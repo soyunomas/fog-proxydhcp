@@ -58,6 +58,11 @@ BIOS and UEFI selection is automatic. The client sends DHCP option 93, also
 called Client System Architecture. BIOS clients get `bootfile_bios`; UEFI
 clients get `bootfile_uefi`.
 
+Optional `[[boot_rule]]` entries can override the selected boot file for MAC
+address prefixes. This is useful when a group of machines, a VM platform, or a
+NIC vendor needs a different iPXE binary. Rules are checked from top to bottom;
+the first matching prefix wins.
+
 One limitation is worth knowing: ProxyDHCP is a complement, not a guaranteed
 override. If the main DHCP server already sends PXE/BOOTP boot information,
 especially a wrong `siaddr` / next-server value, some PXE implementations may
@@ -123,6 +128,14 @@ fog_ip = "192.168.1.50"
 bootfile_bios = "undionly.kpxe"
 bootfile_uefi = "ipxe.efi"
 
+# Optional per-MAC-prefix overrides.
+#
+# [[boot_rule]]
+# name = "virtualbox"
+# mac_prefix = "08:00:27"
+# bootfile_bios = "ipxe.kpxe"
+# bootfile_uefi = "snponly.efi"
+
 listen_dhcp_port = 67
 listen_pxe_port = 4011
 enable_pxe_port = true
@@ -136,9 +149,41 @@ enable_pxe_port = true
 | `fog_ip` | Real FOG server IP. It can be different from the proxy host IP. |
 | `bootfile_bios` | Boot file for legacy BIOS PXE clients. FOG default: `undionly.kpxe`. |
 | `bootfile_uefi` | Boot file for UEFI PXE clients. FOG default: `ipxe.efi`. |
+| `[[boot_rule]]` | Optional per-MAC-prefix bootfile override rules. |
+| `boot_rule.name` | Optional label used in logs when the rule matches. |
+| `boot_rule.mac_prefix` | MAC prefix to match, such as `08:00:27`, `08-00-27`, or `080027`. |
+| `boot_rule.bootfile_bios` | BIOS boot file for matching clients. Omit to fall back to the global BIOS boot file. |
+| `boot_rule.bootfile_uefi` | UEFI boot file for matching clients. Omit to fall back to the global UEFI boot file. |
 | `listen_dhcp_port` | Usually `67`. Receives PXE `DHCPDISCOVER`. |
 | `listen_pxe_port` | Usually `4011`. Handles PXE follow-up requests. |
 | `enable_pxe_port` | Keep enabled for best firmware compatibility. |
+
+### Boot rules
+
+Boot rules let you serve a different iPXE binary to a subset of machines.
+
+```toml
+[[boot_rule]]
+name = "virtualbox"
+mac_prefix = "08:00:27"
+bootfile_bios = "ipxe.kpxe"
+bootfile_uefi = "snponly.efi"
+
+[[boot_rule]]
+name = "uefi-snp-clients"
+mac_prefix = "52:54:00"
+bootfile_uefi = "snponly.efi"
+```
+
+Rules are evaluated in file order. Use the most specific prefixes first. A
+rule may set only `bootfile_bios` or only `bootfile_uefi`; the missing value
+falls back to the global `bootfile_bios` or `bootfile_uefi`.
+
+When a rule matches, the service log includes the source:
+
+```text
+sent OFFER: mac=08:00:27:aa:bb:cc peer=255.255.255.255:68 port=67 bootfile=ipxe.kpxe source=boot_rule:virtualbox arch=[Intel x86PC]
+```
 
 ## Test run
 

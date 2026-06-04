@@ -22,14 +22,28 @@ const (
 )
 
 type Config struct {
-	Interface      string `toml:"interface"`
-	FogIP          string `toml:"fog_ip"`
-	BootfileBIOS   string `toml:"bootfile_bios"`
-	BootfileUEFI   string `toml:"bootfile_uefi"`
-	ListenDHCPPort int    `toml:"listen_dhcp_port"`
-	ListenPXEPort  int    `toml:"listen_pxe_port"`
-	EnablePXEPort  bool   `toml:"enable_pxe_port"`
-	ProxyIP        net.IP `toml:"-"`
+	Interface      string     `toml:"interface"`
+	FogIP          string     `toml:"fog_ip"`
+	BootfileBIOS   string     `toml:"bootfile_bios"`
+	BootfileUEFI   string     `toml:"bootfile_uefi"`
+	ListenDHCPPort int        `toml:"listen_dhcp_port"`
+	ListenPXEPort  int        `toml:"listen_pxe_port"`
+	EnablePXEPort  bool       `toml:"enable_pxe_port"`
+	BootRules      []BootRule `toml:"boot_rule"`
+	ProxyIP        net.IP     `toml:"-"`
+}
+
+type BootRule struct {
+	Name                string `toml:"name"`
+	MACPrefix           string `toml:"mac_prefix"`
+	BootfileBIOS        string `toml:"bootfile_bios"`
+	BootfileUEFI        string `toml:"bootfile_uefi"`
+	normalizedMACPrefix string
+}
+
+type bootSelection struct {
+	File   string
+	Source string
 }
 
 func loadConfig(filename string) (*Config, error) {
@@ -85,7 +99,57 @@ func validateConfig(cfg *Config) error {
 		return fmt.Errorf("listen_pxe_port out of range: %d", cfg.ListenPXEPort)
 	}
 
+	for i := range cfg.BootRules {
+		rule := &cfg.BootRules[i]
+		rule.Name = strings.TrimSpace(rule.Name)
+		rule.MACPrefix = strings.TrimSpace(rule.MACPrefix)
+		rule.BootfileBIOS = strings.TrimSpace(rule.BootfileBIOS)
+		rule.BootfileUEFI = strings.TrimSpace(rule.BootfileUEFI)
+
+		if rule.MACPrefix == "" {
+			return fmt.Errorf("boot_rule[%d] mac_prefix cannot be empty", i)
+		}
+		if rule.BootfileBIOS == "" && rule.BootfileUEFI == "" {
+			return fmt.Errorf("boot_rule[%d] must set bootfile_bios, bootfile_uefi, or both", i)
+		}
+
+		normalized, err := normalizeMACPrefix(rule.MACPrefix)
+		if err != nil {
+			return fmt.Errorf("boot_rule[%d] invalid mac_prefix %q: %w", i, rule.MACPrefix, err)
+		}
+		rule.normalizedMACPrefix = normalized
+	}
+
 	return nil
+}
+
+func normalizeMACPrefix(value string) (string, error) {
+	var builder strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(value)) {
+		switch {
+		case r == ':' || r == '-' || r == '.':
+			continue
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+		case r >= 'a' && r <= 'f':
+			builder.WriteRune(r)
+		default:
+			return "", fmt.Errorf("unexpected character %q", r)
+		}
+	}
+
+	normalized := builder.String()
+	if len(normalized) == 0 {
+		return "", errors.New("empty prefix")
+	}
+	if len(normalized)%2 != 0 {
+		return "", errors.New("prefix must contain full MAC octets")
+	}
+	if len(normalized) > 12 {
+		return "", errors.New("prefix is longer than a MAC address")
+	}
+
+	return normalized, nil
 }
 
 func interfaceIPv4(name string) (net.IP, error) {
@@ -160,7 +224,8 @@ func makeProxyHandler(cfg *Config, listenPort int) server4.Handler {
 		}
 
 		fogIP := net.ParseIP(cfg.FogIP).To4()
-		bootFile := selectBootFile(req, cfg)
+		selection := selectBootFile(req, cfg)
+		bootFile := selection.File
 
 		// ProxyDHCP must not allocate an address. The real DHCP server does that.
 		reply.YourIPAddr = net.IPv4zero
@@ -183,8 +248,8 @@ func makeProxyHandler(cfg *Config, listenPort int) server4.Handler {
 			return
 		}
 
-		log.Printf("sent %s: mac=%s peer=%s port=%d bootfile=%s arch=%v",
-			replyType, req.ClientHWAddr, peer, listenPort, bootFile, req.ClientArch())
+		log.Printf("sent %s: mac=%s peer=%s port=%d bootfile=%s source=%s arch=%v",
+			replyType, req.ClientHWAddr, peer, listenPort, bootFile, selection.Source, req.ClientArch())
 	}
 }
 
@@ -193,7 +258,10 @@ func isPXEClient(req *dhcpv4.DHCPv4) bool {
 	return strings.HasPrefix(classID, "PXEClient")
 }
 
-func selectBootFile(req *dhcpv4.DHCPv4, cfg *Config) string {
+func selectBootFile(req *dhcpv4.DHCPv4, cfg *Config) bootSelection {
+	rule := matchingBootRule(req.ClientHWAddr, cfg.BootRules)
+	source := "default"
+
 	// IANA DHCP option 93 architecture values commonly seen with PXE:
 	// 0  = Intel x86PC BIOS
 	// 6  = EFI IA32
@@ -203,10 +271,39 @@ func selectBootFile(req *dhcpv4.DHCPv4, cfg *Config) string {
 	for _, arch := range req.ClientArch() {
 		switch uint16(arch) {
 		case 6, 7, 9, 11:
-			return cfg.BootfileUEFI
+			if rule != nil && rule.BootfileUEFI != "" {
+				return bootSelection{File: rule.BootfileUEFI, Source: ruleSource(rule)}
+			}
+			return bootSelection{File: cfg.BootfileUEFI, Source: source}
 		}
 	}
-	return cfg.BootfileBIOS
+
+	if rule != nil && rule.BootfileBIOS != "" {
+		return bootSelection{File: rule.BootfileBIOS, Source: ruleSource(rule)}
+	}
+	return bootSelection{File: cfg.BootfileBIOS, Source: source}
+}
+
+func matchingBootRule(mac net.HardwareAddr, rules []BootRule) *BootRule {
+	normalizedMAC, err := normalizeMACPrefix(mac.String())
+	if err != nil {
+		return nil
+	}
+
+	for i := range rules {
+		if strings.HasPrefix(normalizedMAC, rules[i].normalizedMACPrefix) {
+			return &rules[i]
+		}
+	}
+
+	return nil
+}
+
+func ruleSource(rule *BootRule) string {
+	if rule.Name != "" {
+		return "boot_rule:" + rule.Name
+	}
+	return "boot_rule:" + rule.MACPrefix
 }
 
 func pxeVendorOption43() []byte {

@@ -26,6 +26,24 @@ fog_ip = "192.168.24.2"
 bootfile_bios = "undionly.kpxe"
 bootfile_uefi = "ipxe.efi"
 
+# Optional boot rules. Rules are checked from top to bottom. The first matching
+# mac_prefix wins. Prefixes can use ":" "-" "." separators or no separators.
+#
+# Example: VirtualBox NICs usually start with 08:00:27.
+#
+# [[boot_rule]]
+# name = "virtualbox"
+# mac_prefix = "08:00:27"
+# bootfile_bios = "ipxe.kpxe"
+# bootfile_uefi = "snponly.efi"
+#
+# Example: only override UEFI for one vendor; BIOS falls back to bootfile_bios.
+#
+# [[boot_rule]]
+# name = "uefi-snp-clients"
+# mac_prefix = "52:54:00"
+# bootfile_uefi = "snponly.efi"
+
 # Standard ProxyDHCP/PXE ports.
 # Port 67 receives DHCPDISCOVER broadcasts.
 # Port 4011 handles PXE DHCPREQUEST traffic used by many firmwares.
