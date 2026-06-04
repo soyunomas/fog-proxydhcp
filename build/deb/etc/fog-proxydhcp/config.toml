@@ -1,0 +1,36 @@
+# FOG ProxyDHCP configuration
+
+# Network interface where PXE clients are visible.
+# Examples: eth0, ens18, enp3s0
+interface = "eno1"
+
+# Real FOG server IP address. This can be a different machine than this proxy.
+fog_ip = "192.168.24.2"
+
+# FOG default boot files.
+# Common FOG/iPXE alternatives. Uncomment the pair that fits your clients.
+#
+# Legacy BIOS:
+# - undionly.kpxe   default FOG BIOS chainloader, uses the NIC PXE/UNDI stack.
+# - undionly.kkpxe  BIOS fallback for systems that need more PXE stack kept loaded.
+# - ipxe.kpxe       BIOS chainloader with native iPXE drivers.
+# - ipxe.kkpxe      BIOS fallback variant with more PXE stack kept loaded.
+#
+# UEFI:
+# - snponly.efi     common FOG UEFI choice, uses the firmware SNP driver.
+# - ipxe.efi        UEFI iPXE with native drivers.
+# - snp.efi         UEFI SNP variant that can try more than the boot NIC.
+#
+# FOG may include additional NIC-specific files in /tftpboot, such as
+# intel.pxe, intel.efi, realtek.kpxe, realtek.kkpxe, and realtek.efi.
+bootfile_bios = "undionly.kpxe"
+bootfile_uefi = "ipxe.efi"
+
+# Standard ProxyDHCP/PXE ports.
+# Port 67 receives DHCPDISCOVER broadcasts.
+# Port 4011 handles PXE DHCPREQUEST traffic used by many firmwares.
+listen_dhcp_port = 67
+listen_pxe_port = 4011
+
+# Keep true unless you know your clients do not require PXE port 4011.
+enable_pxe_port = true

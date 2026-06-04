@@ -1,0 +1,21 @@
+[Unit]
+Description=FOG ProxyDHCP Service
+Documentation=https://github.com/soyunomas/fog-proxydhcp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/fog-proxydhcp
+ExecStart=/usr/local/bin/fog-proxy -config /etc/fog-proxydhcp/config.toml
+Restart=always
+RestartSec=5
+
+# Root is used because UDP/67 is privileged. If you prefer capabilities,
+# install the binary accordingly and adjust User/CapabilityBoundingSet.
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target

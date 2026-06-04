@@ -1,0 +1,10 @@
+Package: fog-proxydhcp
+Version: 0.1.0
+Section: net
+Priority: optional
+Architecture: amd64
+Maintainer: soyunomas
+Homepage: https://github.com/soyunomas/fog-proxydhcp
+Description: ProxyDHCP service for FOG Project PXE booting
+ Provides PXE ProxyDHCP responses for FOG Project environments where
+ the existing DHCP server cannot be modified.
