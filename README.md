@@ -15,6 +15,55 @@ PXE clients                same VLAN/L2 broadcast domain
 
 The proxy can run on the FOG server itself or on another Linux machine. The important requirement is that PXE clients can see the proxy on the same broadcast domain, unless you use DHCP relay/IP helper rules.
 
+## How it works
+
+PXE boot starts with DHCP. A client broadcasts a DHCP request because it needs
+an IP address before it can download anything. In a normal network, the existing
+DHCP server answers with the client IP address, subnet mask, gateway, DNS, and
+lease information.
+
+FOG also needs the PXE client to learn two boot-specific values:
+
+```text
+TFTP server / next-server  -> the FOG server IP
+Boot file name             -> the iPXE loader, such as undionly.kpxe or ipxe.efi
+```
+
+A ProxyDHCP service provides only those PXE boot values. It does not assign an
+IP address and does not replace the real DHCP server. This lets you add FOG PXE
+booting on networks where the DHCP server is controlled by a router, Windows
+DHCP, campus DHCP, or another service you do not want to replace.
+
+The packet flow is:
+
+```text
+1. PXE client broadcasts DHCPDISCOVER on UDP/67.
+2. Real DHCP server replies with the client IP configuration.
+3. fog-proxydhcp also replies with PXE boot information.
+4. Some PXE firmwares send a follow-up PXE DHCPREQUEST to UDP/4011.
+5. The client downloads the selected boot file from the FOG TFTP server.
+```
+
+This service fills both common DHCP options and BOOTP fields:
+
+```text
+option 66  TFTP server name
+option 67  boot file name
+siaddr     next-server address
+sname      server name
+file       boot file name
+```
+
+BIOS and UEFI selection is automatic. The client sends DHCP option 93, also
+called Client System Architecture. BIOS clients get `bootfile_bios`; UEFI
+clients get `bootfile_uefi`.
+
+One limitation is worth knowing: ProxyDHCP is a complement, not a guaranteed
+override. If the main DHCP server already sends PXE/BOOTP boot information,
+especially a wrong `siaddr` / next-server value, some PXE implementations may
+prefer the main DHCP server's value. In that case, remove PXE boot settings from
+the main DHCP server or configure them there with the correct FOG server IP.
+
 ## Features
 
 - TOML configuration.
@@ -319,26 +368,27 @@ make help
 
 Current targets include:
 
-```text
-help
-deps
-tidy
-fmt
-check
-build
-clean
-run
-install
-uninstall
-install-service
-uninstall-service
-service-start
-service-stop
-service-restart
-service-status
-logs
-ports
-```
+| Target | Description |
+|---|---|
+| `help` | Show the available Make targets. |
+| `deps` | Run `go mod tidy` to sync Go module dependencies. |
+| `tidy` | Alias for `deps`. |
+| `fmt` | Format Go source files. |
+| `check` | Format the code and run the Go package checks. |
+| `build` | Build the static Linux amd64 `fog-proxy` binary. |
+| `deb` | Build a Debian package under `dist/`. |
+| `clean` | Remove the generated binary and packaging output directories. |
+| `run` | Build and run `fog-proxy` locally with `sudo` and `config.toml`. |
+| `install` | Install the binary and config under `/usr/local/bin` and `/etc/fog-proxydhcp`. |
+| `uninstall` | Remove the installed binary, config directory, and service unit. |
+| `install-service` | Install the binary/config and enable the systemd service. |
+| `uninstall-service` | Disable, stop, and remove the systemd service unit. |
+| `service-start` | Start `fog-proxy.service`. |
+| `service-stop` | Stop `fog-proxy.service`. |
+| `service-restart` | Restart `fog-proxy.service`. |
+| `service-status` | Show `fog-proxy.service` status. |
+| `logs` | Follow `fog-proxy.service` journal logs. |
+| `ports` | Show processes listening on UDP/67 or UDP/4011. |
 
 ## License
 
