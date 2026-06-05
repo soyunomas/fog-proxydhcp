@@ -38,6 +38,7 @@ El flujo de paquetes es:
 3. fog-proxydhcp también responde con información de arranque PXE.
 4. Algunos firmwares PXE envían una solicitud PXE DHCPREQUEST posterior a UDP/4011.
 5. El cliente descarga el archivo de arranque seleccionado desde el servidor TFTP de FOG.
+6. Cuando iPXE ya está arrancado, puede hacer otro DHCP con user-class "iPXE"; el proxy puede responder entonces con un script iPXE HTTP como el boot.php de FOG.
 ```
 
 Este servicio rellena tanto opciones DHCP comunes como campos BOOTP:
@@ -45,11 +46,16 @@ Este servicio rellena tanto opciones DHCP comunes como campos BOOTP:
 ```text
 option 66  nombre del servidor TFTP
 option 67  nombre del archivo de arranque
-option 43  datos de proveedor PXE: control de descubrimiento, lista de servidores de arranque, menú, prompt
+option 43  datos de proveedor PXE para firmware PXE: control de descubrimiento, lista de servidores de arranque, menú, prompt
 siaddr     dirección next-server
 sname      nombre del servidor
 file       nombre del archivo de arranque
 ```
+
+Para clientes que ya se identifican como iPXE, la opción 43 no se envía
+intencionadamente. iPXE puede usar directamente la opción 67, incluso con una
+URI completa. Esto evita un problema común: que iPXE combine el bootfile del
+proxy con un `next-server` incorrecto enviado por el router DHCP principal.
 
 La selección BIOS y UEFI es automática. El cliente envía la opción DHCP 93, también llamada Client System Architecture. Los clientes BIOS reciben `bootfile_bios`; los clientes UEFI reciben `bootfile_uefi`.
 
@@ -75,6 +81,8 @@ Conviene conocer una limitación: ProxyDHCP es un complemento, no una sobrescrit
   - subopción 8 / lista de servidores de arranque PXE.
   - subopción 9 / menú de arranque PXE.
   - subopción 10 / prompt del menú PXE.
+- Destino opcional de segunda fase iPXE mediante `ipxe_bootfile`.
+- Servidor TFTP opcional solo para laboratorio, útil para probar sin FOG real.
 - Compilación de binario Linux estático.
 - Objetivo `make help`.
 - Unidad systemd.
@@ -120,6 +128,10 @@ fog_ip = "192.168.1.50"
 bootfile_bios = "undionly.kpxe"
 bootfile_uefi = "ipxe.efi"
 
+# Opcional pero útil con clientes iPXE nativos y máquinas virtuales.
+# Con un servidor FOG real, usa el script HTTP de arranque de FOG.
+ipxe_bootfile = "http://192.168.1.50/fog/service/ipxe/boot.php"
+
 # Sobrescrituras opcionales por prefijo MAC.
 #
 # [[boot_rule]]
@@ -131,6 +143,9 @@ bootfile_uefi = "ipxe.efi"
 listen_dhcp_port = 67
 listen_pxe_port = 4011
 enable_pxe_port = true
+
+# Déjalo en false cuando un FOG real proporciona TFTP.
+enable_tftp = false
 ```
 
 ### Campos importantes
@@ -141,6 +156,7 @@ enable_pxe_port = true
 | `fog_ip` | IP real del servidor FOG. Puede ser distinta de la IP del host proxy. |
 | `bootfile_bios` | Archivo de arranque para clientes PXE BIOS legacy. Valor predeterminado de FOG: `undionly.kpxe`. |
 | `bootfile_uefi` | Archivo de arranque para clientes PXE UEFI. Valor predeterminado de FOG: `ipxe.efi`. |
+| `ipxe_bootfile` | Destino opcional para clientes que ya son iPXE. Con FOG usa una URI HTTP completa, normalmente `http://IP_FOG/fog/service/ipxe/boot.php`. |
 | `[[boot_rule]]` | Reglas opcionales de sobrescritura de bootfile por prefijo MAC. |
 | `boot_rule.name` | Etiqueta opcional usada en logs cuando la regla coincide. |
 | `boot_rule.mac_prefix` | Prefijo MAC a comparar, como `08:00:27`, `08-00-27` o `080027`. |
@@ -149,6 +165,75 @@ enable_pxe_port = true
 | `listen_dhcp_port` | Normalmente `67`. Recibe `DHCPDISCOVER` PXE. |
 | `listen_pxe_port` | Normalmente `4011`. Gestiona solicitudes PXE posteriores. |
 | `enable_pxe_port` | Déjalo activado para la mejor compatibilidad con firmwares. |
+| `enable_tftp` | Ayudante opcional de laboratorio. Déjalo en `false` en producción cuando FOG sirve TFTP. |
+| `listen_tftp_port` | Puerto TFTP para el ayudante de laboratorio. Normalmente `69`. |
+| `tftp_root` | Directorio servido por el ayudante TFTP cuando `enable_tftp = true`. |
+
+### Qué poner en cada caso
+
+#### FOG real, proxy ejecutándose en el propio servidor FOG
+
+Usa la interfaz y la IP del servidor FOG:
+
+```toml
+interface = "eth0"
+fog_ip = "192.168.1.50"
+
+bootfile_bios = "undionly.kpxe"
+bootfile_uefi = "ipxe.efi"
+ipxe_bootfile = "http://192.168.1.50/fog/service/ipxe/boot.php"
+
+listen_dhcp_port = 67
+listen_pxe_port = 4011
+enable_pxe_port = true
+
+enable_tftp = false
+```
+
+El servicio TFTP propio de FOG debe servir `/tftpboot`. Este proxy solo anuncia
+FOG; no debe reemplazar TFTP en producción.
+
+#### FOG real, proxy ejecutándose en otra máquina
+
+Usa la interfaz de la máquina proxy, pero deja `fog_ip` apuntando al servidor
+FOG:
+
+```toml
+interface = "eth0"          # interfaz en la máquina proxy
+fog_ip = "192.168.1.50"     # servidor FOG, no el proxy
+
+bootfile_bios = "undionly.kpxe"
+bootfile_uefi = "ipxe.efi"
+ipxe_bootfile = "http://192.168.1.50/fog/service/ipxe/boot.php"
+
+enable_pxe_port = true
+enable_tftp = false
+```
+
+Los clientes deben poder llegar al servidor FOG por UDP/69 y TCP/80.
+
+#### Laboratorio sin FOG
+
+Úsalo solo para probar el camino del proxy. Aquí el host proxy también emula
+TFTP:
+
+```toml
+interface = "eth0"
+fog_ip = "192.168.1.60"       # host proxy/laboratorio
+
+bootfile_bios = "undionly.kpxe"
+bootfile_uefi = "ipxe.efi"
+ipxe_bootfile = "fog-local.ipxe"
+
+enable_pxe_port = true
+enable_tftp = true
+listen_tftp_port = 69
+tftp_root = "lab/tftproot"
+```
+
+Cuando `ipxe_bootfile` es solo un nombre de fichero, el proxy lo anuncia a iPXE
+como `tftp://fog_ip/fichero`. Eso es para el ayudante de laboratorio. Con FOG,
+prefiere la URI HTTP completa a `boot.php`.
 
 ### Reglas de arranque
 
@@ -331,6 +416,8 @@ Usa esto en `config.toml` en la máquina proxy:
 
 ```toml
 fog_ip = "192.168.1.50"
+ipxe_bootfile = "http://192.168.1.50/fog/service/ipxe/boot.php"
+enable_tftp = false
 ```
 
 No pongas `fog_ip` con la IP de la máquina proxy salvo que el proxy sea también el servidor FOG/TFTP.
@@ -345,6 +432,7 @@ Comprueba que:
 - `fog_ip` apunta al servidor FOG real.
 - El cliente puede alcanzar UDP/69 en el servidor FOG.
 - El bootfile seleccionado existe bajo la raíz TFTP de FOG.
+- Si el cliente ya es iPXE e intenta descargar desde la IP del router, define `ipxe_bootfile = "http://IP_FOG/fog/service/ipxe/boot.php"`.
 
 ### El cliente funciona en BIOS pero no en UEFI
 

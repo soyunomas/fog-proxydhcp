@@ -44,6 +44,7 @@ The packet flow is:
 3. fog-proxydhcp also replies with PXE boot information.
 4. Some PXE firmwares send a follow-up PXE DHCPREQUEST to UDP/4011.
 5. The client downloads the selected boot file from the FOG TFTP server.
+6. Once iPXE is running, it may DHCP again with user-class "iPXE"; the proxy can then send an HTTP iPXE script such as FOG's boot.php.
 ```
 
 This service fills both common DHCP options and BOOTP fields:
@@ -51,11 +52,16 @@ This service fills both common DHCP options and BOOTP fields:
 ```text
 option 66  TFTP server name
 option 67  boot file name
-option 43  PXE vendor data: discovery control, boot server list, menu, prompt
+option 43  PXE vendor data for PXE firmware: discovery control, boot server list, menu, prompt
 siaddr     next-server address
 sname      server name
 file       boot file name
 ```
+
+For clients that already identify themselves as iPXE, option 43 is intentionally
+not sent. iPXE can use option 67 directly, including a full URI. This avoids a
+common problem where iPXE combines the proxy's boot file with the main router's
+wrong next-server address.
 
 BIOS and UEFI selection is automatic. The client sends DHCP option 93, also
 called Client System Architecture. BIOS clients get `bootfile_bios`; UEFI
@@ -90,6 +96,8 @@ the main DHCP server or configure them there with the correct FOG server IP.
   - sub-option 8 / PXE boot server list.
   - sub-option 9 / PXE boot menu.
   - sub-option 10 / PXE menu prompt.
+- Optional iPXE second-stage boot target using `ipxe_bootfile`.
+- Optional lab-only TFTP server for testing without a real FOG server.
 - Static Linux binary build.
 - `make help` target.
 - systemd unit.
@@ -135,6 +143,10 @@ fog_ip = "192.168.1.50"
 bootfile_bios = "undionly.kpxe"
 bootfile_uefi = "ipxe.efi"
 
+# Optional but useful with native iPXE clients and virtual machines.
+# For a real FOG server, use the FOG HTTP boot script.
+ipxe_bootfile = "http://192.168.1.50/fog/service/ipxe/boot.php"
+
 # Optional per-MAC-prefix overrides.
 #
 # [[boot_rule]]
@@ -146,6 +158,9 @@ bootfile_uefi = "ipxe.efi"
 listen_dhcp_port = 67
 listen_pxe_port = 4011
 enable_pxe_port = true
+
+# Keep false when a real FOG server provides TFTP.
+enable_tftp = false
 ```
 
 ### Important fields
@@ -156,6 +171,7 @@ enable_pxe_port = true
 | `fog_ip` | Real FOG server IP. It can be different from the proxy host IP. |
 | `bootfile_bios` | Boot file for legacy BIOS PXE clients. FOG default: `undionly.kpxe`. |
 | `bootfile_uefi` | Boot file for UEFI PXE clients. FOG default: `ipxe.efi`. |
+| `ipxe_bootfile` | Optional boot target for clients that already are iPXE. Use a full HTTP URI for FOG, usually `http://FOG_IP/fog/service/ipxe/boot.php`. |
 | `[[boot_rule]]` | Optional per-MAC-prefix bootfile override rules. |
 | `boot_rule.name` | Optional label used in logs when the rule matches. |
 | `boot_rule.mac_prefix` | MAC prefix to match, such as `08:00:27`, `08-00-27`, or `080027`. |
@@ -164,6 +180,72 @@ enable_pxe_port = true
 | `listen_dhcp_port` | Usually `67`. Receives PXE `DHCPDISCOVER`. |
 | `listen_pxe_port` | Usually `4011`. Handles PXE follow-up requests. |
 | `enable_pxe_port` | Keep enabled for best firmware compatibility. |
+| `enable_tftp` | Optional lab helper. Keep `false` in production when FOG serves TFTP. |
+| `listen_tftp_port` | TFTP port for the lab helper. Usually `69`. |
+| `tftp_root` | Directory served by the lab TFTP helper when `enable_tftp = true`. |
+
+### What to put in each scenario
+
+#### Real FOG server, proxy running on the FOG server
+
+Use the FOG server's interface and IP:
+
+```toml
+interface = "eth0"
+fog_ip = "192.168.1.50"
+
+bootfile_bios = "undionly.kpxe"
+bootfile_uefi = "ipxe.efi"
+ipxe_bootfile = "http://192.168.1.50/fog/service/ipxe/boot.php"
+
+listen_dhcp_port = 67
+listen_pxe_port = 4011
+enable_pxe_port = true
+
+enable_tftp = false
+```
+
+FOG's own TFTP service must serve `/tftpboot`. This proxy only advertises FOG.
+
+#### Real FOG server, proxy running on another machine
+
+Use the proxy machine's interface, but keep `fog_ip` pointed at the FOG server:
+
+```toml
+interface = "eth0"          # interface on the proxy machine
+fog_ip = "192.168.1.50"     # FOG server, not the proxy
+
+bootfile_bios = "undionly.kpxe"
+bootfile_uefi = "ipxe.efi"
+ipxe_bootfile = "http://192.168.1.50/fog/service/ipxe/boot.php"
+
+enable_pxe_port = true
+enable_tftp = false
+```
+
+Clients must be able to reach the FOG server on UDP/69 and TCP/80.
+
+#### Lab without FOG
+
+Only use this to test the proxy path. Here the proxy host also emulates TFTP:
+
+```toml
+interface = "eth0"
+fog_ip = "192.168.1.60"       # proxy/lab host
+
+bootfile_bios = "undionly.kpxe"
+bootfile_uefi = "ipxe.efi"
+ipxe_bootfile = "fog-local.ipxe"
+
+enable_pxe_port = true
+enable_tftp = true
+listen_tftp_port = 69
+tftp_root = "lab/tftproot"
+```
+
+When `ipxe_bootfile` is a plain file name, the proxy advertises it to iPXE as
+`tftp://fog_ip/filename`. That is for the lab helper. With FOG, prefer the full
+HTTP URI to `boot.php`.
 
 ### Boot rules
 
@@ -351,6 +433,8 @@ Use this in `config.toml` on the proxy machine:
 
 ```toml
 fog_ip = "192.168.1.50"
+ipxe_bootfile = "http://192.168.1.50/fog/service/ipxe/boot.php"
+enable_tftp = false
 ```
 
 Do **not** set `fog_ip` to the proxy machine unless the proxy is also the FOG/TFTP server.
@@ -365,6 +449,7 @@ Check that:
 - `fog_ip` points to the real FOG server.
 - The client can reach UDP/69 on the FOG server.
 - The selected bootfile exists under the FOG TFTP root.
+- If the client is already iPXE and tries to download from the router IP, set `ipxe_bootfile = "http://FOG_IP/fog/service/ipxe/boot.php"`.
 
 ### Client works in BIOS but not UEFI
 

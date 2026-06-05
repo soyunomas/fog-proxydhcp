@@ -1,0 +1,7 @@
+#!ipxe
+echo
+echo FOG emulation reached successfully.
+echo DHCP + ProxyDHCP + TFTP + iPXE chainload are OK.
+echo No real FOG server is configured, stopping here.
+echo
+shell
