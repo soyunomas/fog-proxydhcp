@@ -26,6 +26,19 @@ fog_ip = "192.168.24.2"
 bootfile_bios = "undionly.kpxe"
 bootfile_uefi = "ipxe.efi"
 
+# Optional iPXE second-stage boot target.
+#
+# BIOS/UEFI PXE firmware uses bootfile_bios or bootfile_uefi above. Once iPXE
+# is running, it identifies itself with DHCP user-class "iPXE"; at that point it
+# can boot from a URI. For a real FOG server, this should normally be the FOG
+# HTTP boot script:
+#
+# ipxe_bootfile = "http://192.168.24.2/fog/service/ipxe/boot.php"
+#
+# Leave it commented if you want FOG's own iPXE binary/default script to drive
+# the second stage. Set it when clients with native iPXE firmware, virtual
+# machines, or chainloaded iPXE need to be sent directly to FOG's boot menu.
+
 # Optional boot rules. Rules are checked from top to bottom. The first matching
 # mac_prefix wins. Prefixes can use ":" "-" "." separators or no separators.
 #
@@ -52,3 +65,10 @@ listen_pxe_port = 4011
 
 # Keep true unless you know your clients do not require PXE port 4011.
 enable_pxe_port = true
+
+# Optional lab-only TFTP/FOG emulation. Keep disabled with a real FOG server,
+# because FOG's own TFTP service should serve /tftpboot.
+#
+enable_tftp = false
+listen_tftp_port = 69
+tftp_root = "lab/tftproot"

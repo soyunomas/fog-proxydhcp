@@ -1,0 +1,31 @@
+# Configuracion de laboratorio para VM VirtualBox en adaptador puente.
+#
+# Usa el DHCP real del router de casa. Este proceso solo anuncia PXE y, si
+# enable_tftp=true, emula el TFTP de FOG en este mismo host.
+
+# Cambia esto por la interfaz de tu LAN real, por ejemplo eno1, enp3s0 o wlan0.
+interface = "CAMBIA_ESTO"
+
+# Cambia esto por la IP LAN del host que ejecuta fog-proxydhcp.
+# Debe estar en la misma red que la VM puente y debe ser alcanzable por TFTP.
+fog_ip = "192.168.1.X"
+
+# Para una VM VirtualBox BIOS, undionly.kpxe suele ser suficiente.
+# Para UEFI necesitas tener ipxe.efi dentro de lab/tftproot.
+bootfile_bios = "undionly.kpxe"
+bootfile_uefi = "ipxe.efi"
+
+# Cuando el binario iPXE ya ha arrancado, se identifica con user-class "iPXE".
+# En ese segundo DHCP le damos este script para no chainloadear undionly.kpxe
+# en bucle. El script se queda en la shell de iPXE para evitar el FATAL de
+# VirtualBox al volver a un BIOS sin disco.
+ipxe_bootfile = "fog-local.ipxe"
+
+listen_dhcp_port = 67
+listen_pxe_port = 4011
+enable_pxe_port = true
+
+# Emulacion minima del TFTP de FOG.
+enable_tftp = true
+listen_tftp_port = 69
+tftp_root = "lab/tftproot"
