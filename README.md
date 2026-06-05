@@ -1,5 +1,7 @@
 # FOG ProxyDHCP
 
+[Español](README-ES.md)
+
 `fog-proxydhcp` is a small Go ProxyDHCP service for FOG Project environments where the existing DHCP server cannot be modified.
 
 It does **not** assign IP addresses. Your existing router, Windows DHCP, Kea, ISC DHCP or campus DHCP keeps doing that. This service only answers PXE clients with the FOG boot server and boot file information.
@@ -49,6 +51,7 @@ This service fills both common DHCP options and BOOTP fields:
 ```text
 option 66  TFTP server name
 option 67  boot file name
+option 43  PXE vendor data: discovery control, boot server list, menu, prompt
 siaddr     next-server address
 sname      server name
 file       boot file name
@@ -83,6 +86,10 @@ the main DHCP server or configure them there with the correct FOG server IP.
   - `sname`.
   - `file`.
 - PXE vendor option 43 helper to reduce firmware fallback discovery problems.
+  - sub-option 6 / PXE discovery control.
+  - sub-option 8 / PXE boot server list.
+  - sub-option 9 / PXE boot menu.
+  - sub-option 10 / PXE menu prompt.
 - Static Linux binary build.
 - `make help` target.
 - systemd unit.
