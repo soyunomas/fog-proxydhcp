@@ -241,7 +241,7 @@ func makeProxyHandler(cfg *Config, listenPort int) server4.Handler {
 		reply.UpdateOption(dhcpv4.OptClassIdentifier("PXEClient"))
 		reply.UpdateOption(dhcpv4.OptTFTPServerName(cfg.FogIP))
 		reply.UpdateOption(dhcpv4.OptBootFileName(bootFile))
-		reply.UpdateOption(dhcpv4.OptGeneric(dhcpv4.OptionVendorSpecificInformation, pxeVendorOption43()))
+		reply.UpdateOption(dhcpv4.OptGeneric(dhcpv4.OptionVendorSpecificInformation, pxeVendorOption43(fogIP)))
 
 		if _, err := conn.WriteTo(reply.ToBytes(), peer); err != nil {
 			log.Printf("send failed: mac=%s peer=%s port=%d err=%v", req.ClientHWAddr, peer, listenPort, err)
@@ -306,11 +306,21 @@ func ruleSource(rule *BootRule) string {
 	return "boot_rule:" + rule.MACPrefix
 }
 
-func pxeVendorOption43() []byte {
+func pxeVendorOption43(serverIP net.IP) []byte {
+	serverIP = serverIP.To4()
+	if serverIP == nil {
+		return []byte{255}
+	}
+
 	return []byte{
 		// Sub-option 6: PXE Discovery Control.
-		// 8 asks the client not to do extra broadcast discovery.
-		6, 1, 8,
+		// 7 asks the client to use the PXE_BOOT_SERVERS list and avoid
+		// multicast/broadcast discovery.
+		6, 1, 7,
+
+		// Sub-option 8: PXE Boot Servers.
+		// Type 0, one server, followed by the FOG/PXE server IPv4 address.
+		8, 7, 0, 0, 1, serverIP[0], serverIP[1], serverIP[2], serverIP[3],
 
 		// Sub-option 9: PXE Boot Menu.
 		// Type 0, layer 2, label "FOG".

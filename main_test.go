@@ -125,3 +125,23 @@ func TestSelectBootFileUsesRuleUEFIOverride(t *testing.T) {
 		t.Fatalf("selection.Source = %q, want rule source", selection.Source)
 	}
 }
+
+func TestPXEVendorOption43IncludesBootServerList(t *testing.T) {
+	got := pxeVendorOption43(net.IPv4(192, 168, 24, 2))
+	want := []byte{
+		6, 1, 7,
+		8, 7, 0, 0, 1, 192, 168, 24, 2,
+		9, 6, 0, 0, 2, 'F', 'O', 'G',
+		10, 4, 0, 'F', 'O', 'G',
+		255,
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("len(pxeVendorOption43) = %d, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("pxeVendorOption43 byte %d = %d, want %d: %v", i, got[i], want[i], got)
+		}
+	}
+}
