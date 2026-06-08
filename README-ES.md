@@ -33,29 +33,17 @@ Un servicio ProxyDHCP proporciona solo esos valores de arranque PXE. No asigna u
 El flujo de paquetes es:
 
 ```text
-1. El cliente PXE envía un DHCPDISCOVER por broadcast en UDP/67.
-2. El servidor DHCP real responde con la configuración IP del cliente.
-3. fog-proxydhcp también responde con información de arranque PXE.
-4. Algunos firmwares PXE envían una solicitud PXE DHCPREQUEST posterior a UDP/4011.
-5. El cliente descarga el archivo de arranque seleccionado desde el servidor TFTP de FOG.
-6. Cuando iPXE ya está arrancado, puede hacer otro DHCP con user-class "iPXE"; el proxy puede responder entonces con un script iPXE HTTP como el boot.php de FOG.
+1. El cliente PXE envía DHCPDISCOVER por broadcast a UDP/67.
+2. El DHCP real ofrece una dirección IP.
+3. fog-proxydhcp anuncia que existe un servicio PXE, sin enviar aún el bootfile.
+4. El cliente acepta la IP del DHCP real.
+5. El firmware PXE solicita los datos de arranque al proxy por UDP/4011.
+6. El proxy responde con el servidor TFTP y el cargador BIOS o UEFI.
+7. El cliente descarga el cargador desde el TFTP de FOG.
+8. iPXE abre boot.php por HTTP y muestra el menú FOG.
 ```
 
-Este servicio rellena tanto opciones DHCP comunes como campos BOOTP:
-
-```text
-option 66  nombre del servidor TFTP
-option 67  nombre del archivo de arranque
-option 43  datos de proveedor PXE para firmware PXE: control de descubrimiento, lista de servidores de arranque, menú, prompt
-siaddr     dirección next-server
-sname      nombre del servidor
-file       nombre del archivo de arranque
-```
-
-Para clientes que ya se identifican como iPXE, la opción 43 no se envía
-intencionadamente. iPXE puede usar directamente la opción 67, incluso con una
-URI completa. Esto evita un problema común: que iPXE combine el bootfile del
-proxy con un `next-server` incorrecto enviado por el router DHCP principal.
+En la oferta inicial de UDP/67 no se envía el bootfile. Los datos reales de arranque se entregan en UDP/4011 mediante option 66, option 67 y los campos BOOTP `siaddr`, `sname` y `file`. Los clientes que ya se identifican como iPXE pueden recibir directamente la URL HTTP configurada en `ipxe_bootfile`.
 
 La selección BIOS y UEFI es automática. El cliente envía la opción DHCP 93, también llamada Client System Architecture. Los clientes BIOS reciben `bootfile_bios`; los clientes UEFI reciben `bootfile_uefi`.
 
@@ -76,11 +64,8 @@ Conviene conocer una limitación: ProxyDHCP es un complemento, no una sobrescrit
   - `siaddr`.
   - `sname`.
   - `file`.
-- Ayudante para la opción PXE vendor 43, para reducir problemas de descubrimiento alternativo en firmwares:
-  - subopción 6 / control de descubrimiento PXE.
-  - subopción 8 / lista de servidores de arranque PXE.
-  - subopción 9 / menú de arranque PXE.
-  - subopción 10 / prompt del menú PXE.
+- Flujo ProxyDHCP en dos fases compatible con firmware UEFI de VirtualBox.
+- Lista blanca/negra opcional por prefijo MAC mediante `[[client_rule]]`.
 - Destino opcional de segunda fase iPXE mediante `ipxe_bootfile`.
 - Servidor TFTP opcional solo para laboratorio, útil para probar sin FOG real.
 - Compilación de binario Linux estático.
@@ -90,7 +75,7 @@ Conviene conocer una limitación: ProxyDHCP es un complemento, no una sobrescrit
 ## Requisitos
 
 - Linux.
-- Go 1.22 o posterior.
+- Go 1.23 o posterior.
 - Privilegios root o capacidades equivalentes para enlazar UDP/67 y UDP/4011.
 - Un servidor FOG funcional con archivos TFTP/iPXE disponibles.
 - Clientes PXE y proxy en la misma VLAN, salvo que enrutes o retransmitas explícitamente el tráfico DHCP/PXE.
@@ -110,155 +95,239 @@ La compilación produce:
 ./fog-proxy
 ```
 
-## Configuración
+## Compilación para OpenWrt y Raspberry Pi
 
-Edita la configuración incluida:
+El `Makefile` genera binarios Linux estáticos, por lo que no necesita instalar un compilador C cruzado. Consulta todos los objetivos disponibles con:
 
 ```bash
-nano config.toml
+make help
 ```
 
-Modifícala:
+Para compilar todas las arquitecturas habituales de OpenWrt:
+
+```bash
+make openwrt
+```
+
+También puedes compilar solo la arquitectura de tu router:
+
+```bash
+make openwrt-amd64   # OpenWrt x86-64
+make openwrt-armv7   # ARMv7
+make openwrt-arm64   # ARM64 / aarch64
+make openwrt-mips    # MIPS big-endian, soft-float
+make openwrt-mipsel  # MIPS little-endian, soft-float
+```
+
+Para Raspberry Pi:
+
+```bash
+make raspi           # Compila las tres variantes
+make raspi-armv6     # Raspberry Pi 1 y Zero con sistema de 32 bits
+make raspi-armv7     # Raspberry Pi 2/3/4 con sistema de 32 bits
+make raspi-arm64     # Raspberry Pi 3/4/5 con sistema de 64 bits
+```
+
+Los resultados se guardan en `dist/bin/`. Comprueba la arquitectura del dispositivo con `uname -m`: `aarch64` usa `arm64`, `armv7l` usa `armv7`, y `mips`/`mipsel` deben coincidir también en el orden de bytes. OpenWrt necesita espacio suficiente para el binario Go; estos objetivos generan ejecutables, no paquetes `.ipk`.
+
+## Configuración
+
+Abre `config.toml` y elige **un solo escenario**. El archivo trae el escenario probado activo y los demás completamente comentados.
+
+Para usar otro escenario:
+
+1. Comenta el bloque activo completo.
+2. Descomenta el bloque elegido completo.
+3. Cambia las direcciones IP de ejemplo.
+4. No dejes dos escenarios activos a la vez porque TOML no permite claves duplicadas.
+
+### Elección rápida
+
+| Caso | Escenario | Valor de `fog_ip` | `enable_tftp` |
+|---|---|---|---|
+| Proxy instalado en el propio servidor FOG, incluido VirtualBox | 1, probado | IP del servidor FOG | `false` |
+| Proxy instalado en otro ordenador Linux | 2 | IP del servidor FOG remoto | `false` |
+| Solo equipos físicos, sin regla VirtualBox | 3 | IP del servidor FOG | `false` |
+| Laboratorio sin FOG real | 4 | IP del ordenador proxy/laboratorio | `true` |
+
+> **Regla importante:** `interface` siempre pertenece al ordenador que ejecuta `fog-proxydhcp`. `fog_ip` siempre apunta al servidor que ofrece TFTP y FOG. Si proxy y FOG están separados, son dos ordenadores y normalmente dos IP distintas.
+
+Los ejemplos usan siempre `eno1`. Comprueba el nombre real con `ip -brief address` y cámbialo si tu sistema usa otro.
+
+### Escenario 1: probado, proxy en el servidor FOG y VirtualBox
+
+Esta es la configuración principal incluida. Fue probada con VirtualBox en BIOS y UEFI. La regla `08:00:27` selecciona `ipxe.kpxe` para BIOS y `snponly.efi` para UEFI.
 
 ```toml
-interface = "eth0"
-
+interface = "eno1"
 fog_ip = "192.168.1.50"
-
 bootfile_bios = "undionly.kpxe"
 bootfile_uefi = "ipxe.efi"
-
-# Opcional pero útil con clientes iPXE nativos y máquinas virtuales.
-# Con un servidor FOG real, usa el script HTTP de arranque de FOG.
 ipxe_bootfile = "http://192.168.1.50/fog/service/ipxe/boot.php"
-
-# Sobrescrituras opcionales por prefijo MAC.
-#
-# [[boot_rule]]
-# name = "virtualbox"
-# mac_prefix = "08:00:27"
-# bootfile_bios = "ipxe.kpxe"
-# bootfile_uefi = "snponly.efi"
-
 listen_dhcp_port = 67
 listen_pxe_port = 4011
 enable_pxe_port = true
-
-# Déjalo en false cuando un FOG real proporciona TFTP.
+allow_unmatched_clients = true
 enable_tftp = false
-```
-
-### Campos importantes
-
-| Campo | Significado |
-|---|---|
-| `interface` | Interfaz de red Linux donde los clientes PXE son visibles. Ejemplos: `eth0`, `ens18`, `enp3s0`. |
-| `fog_ip` | IP real del servidor FOG. Puede ser distinta de la IP del host proxy. |
-| `bootfile_bios` | Archivo de arranque para clientes PXE BIOS legacy. Valor predeterminado de FOG: `undionly.kpxe`. |
-| `bootfile_uefi` | Archivo de arranque para clientes PXE UEFI. Valor predeterminado de FOG: `ipxe.efi`. |
-| `ipxe_bootfile` | Destino opcional para clientes que ya son iPXE. Con FOG usa una URI HTTP completa, normalmente `http://IP_FOG/fog/service/ipxe/boot.php`. |
-| `[[boot_rule]]` | Reglas opcionales de sobrescritura de bootfile por prefijo MAC. |
-| `boot_rule.name` | Etiqueta opcional usada en logs cuando la regla coincide. |
-| `boot_rule.mac_prefix` | Prefijo MAC a comparar, como `08:00:27`, `08-00-27` o `080027`. |
-| `boot_rule.bootfile_bios` | Archivo de arranque BIOS para clientes coincidentes. Omítelo para usar el archivo BIOS global. |
-| `boot_rule.bootfile_uefi` | Archivo de arranque UEFI para clientes coincidentes. Omítelo para usar el archivo UEFI global. |
-| `listen_dhcp_port` | Normalmente `67`. Recibe `DHCPDISCOVER` PXE. |
-| `listen_pxe_port` | Normalmente `4011`. Gestiona solicitudes PXE posteriores. |
-| `enable_pxe_port` | Déjalo activado para la mejor compatibilidad con firmwares. |
-| `enable_tftp` | Ayudante opcional de laboratorio. Déjalo en `false` en producción cuando FOG sirve TFTP. |
-| `listen_tftp_port` | Puerto TFTP para el ayudante de laboratorio. Normalmente `69`. |
-| `tftp_root` | Directorio servido por el ayudante TFTP cuando `enable_tftp = true`. |
-
-### Qué poner en cada caso
-
-#### FOG real, proxy ejecutándose en el propio servidor FOG
-
-Usa la interfaz y la IP del servidor FOG:
-
-```toml
-interface = "eth0"
-fog_ip = "192.168.1.50"
-
-bootfile_bios = "undionly.kpxe"
-bootfile_uefi = "ipxe.efi"
-ipxe_bootfile = "http://192.168.1.50/fog/service/ipxe/boot.php"
-
-listen_dhcp_port = 67
-listen_pxe_port = 4011
-enable_pxe_port = true
-
-enable_tftp = false
-```
-
-El servicio TFTP propio de FOG debe servir `/tftpboot`. Este proxy solo anuncia
-FOG; no debe reemplazar TFTP en producción.
-
-#### FOG real, proxy ejecutándose en otra máquina
-
-Usa la interfaz de la máquina proxy, pero deja `fog_ip` apuntando al servidor
-FOG:
-
-```toml
-interface = "eth0"          # interfaz en la máquina proxy
-fog_ip = "192.168.1.50"     # servidor FOG, no el proxy
-
-bootfile_bios = "undionly.kpxe"
-bootfile_uefi = "ipxe.efi"
-ipxe_bootfile = "http://192.168.1.50/fog/service/ipxe/boot.php"
-
-enable_pxe_port = true
-enable_tftp = false
-```
-
-Los clientes deben poder llegar al servidor FOG por UDP/69 y TCP/80.
-
-#### Laboratorio sin FOG
-
-Úsalo solo para probar el camino del proxy. Aquí el host proxy también emula
-TFTP:
-
-```toml
-interface = "eth0"
-fog_ip = "192.168.1.60"       # host proxy/laboratorio
-
-bootfile_bios = "undionly.kpxe"
-bootfile_uefi = "ipxe.efi"
-ipxe_bootfile = "fog-local.ipxe"
-
-enable_pxe_port = true
-enable_tftp = true
-listen_tftp_port = 69
 tftp_root = "lab/tftproot"
-```
+listen_tftp_port = 69
 
-Cuando `ipxe_bootfile` es solo un nombre de fichero, el proxy lo anuncia a iPXE
-como `tftp://fog_ip/fichero`. Eso es para el ayudante de laboratorio. Con FOG,
-prefiere la URI HTTP completa a `boot.php`.
-
-### Reglas de arranque
-
-Las reglas de arranque permiten servir un binario iPXE distinto a un subconjunto de máquinas.
-
-```toml
 [[boot_rule]]
-name = "virtualbox"
+name = "virtualbox-tested"
 mac_prefix = "08:00:27"
 bootfile_bios = "ipxe.kpxe"
 bootfile_uefi = "snponly.efi"
+```
+
+FOG debe servir `/tftpboot`. El TFTP auxiliar del proxy permanece desactivado.
+
+### Escenario 2: proxy en otro ordenador distinto de FOG
+
+Sí, funciona. El ordenador proxy no necesita tener FOG instalado. Debe cumplir estas condiciones:
+
+- Proxy, clientes PXE y servidor FOG deben estar en la misma VLAN o dominio de broadcast, salvo que exista DHCP relay/IP helper.
+- `eno1` es la interfaz del ordenador proxy conectada a los clientes.
+- `fog_ip` es la IP del servidor FOG remoto, no la IP del proxy.
+- Los clientes deben alcanzar FOG por UDP/69 y TCP/80.
+- El proxy debe poder escuchar UDP/67 y UDP/4011.
+
+Ejemplo: proxy `192.168.1.60`, FOG `192.168.1.50`:
+
+```toml
+interface = "eno1"
+fog_ip = "192.168.1.50"
+bootfile_bios = "undionly.kpxe"
+bootfile_uefi = "ipxe.efi"
+ipxe_bootfile = "http://192.168.1.50/fog/service/ipxe/boot.php"
+listen_dhcp_port = 67
+listen_pxe_port = 4011
+enable_pxe_port = true
+allow_unmatched_clients = true
+enable_tftp = false
+tftp_root = "lab/tftproot"
+listen_tftp_port = 69
 
 [[boot_rule]]
-name = "uefi-snp-clients"
-mac_prefix = "52:54:00"
+name = "virtualbox-tested"
+mac_prefix = "08:00:27"
+bootfile_bios = "ipxe.kpxe"
 bootfile_uefi = "snponly.efi"
 ```
 
-Las reglas se evalúan en el orden del archivo. Usa primero los prefijos más específicos. Una regla puede definir solo `bootfile_bios` o solo `bootfile_uefi`; el valor ausente cae al `bootfile_bios` o `bootfile_uefi` global.
+Observa que la IP `192.168.1.60` del proxy no aparece en `fog_ip`: el programa obtiene automáticamente la IP del proxy desde `eno1`.
 
-Cuando una regla coincide, el log del servicio incluye el origen:
+### Escenario 3: FOG real y equipos físicos
 
-```text
-sent OFFER: mac=08:00:27:aa:bb:cc peer=255.255.255.255:68 port=67 bootfile=ipxe.kpxe source=boot_rule:virtualbox arch=[Intel x86PC]
+Es igual al escenario 1 o 2, pero sin `[[boot_rule]]`. Usa los cargadores globales de FOG:
+
+```toml
+interface = "eno1"
+fog_ip = "192.168.1.50"
+bootfile_bios = "undionly.kpxe"
+bootfile_uefi = "ipxe.efi"
+ipxe_bootfile = "http://192.168.1.50/fog/service/ipxe/boot.php"
+listen_dhcp_port = 67
+listen_pxe_port = 4011
+enable_pxe_port = true
+allow_unmatched_clients = true
+enable_tftp = false
+tftp_root = "lab/tftproot"
+listen_tftp_port = 69
 ```
+
+### Escenario 4: laboratorio sin FOG
+
+Este modo prueba ProxyDHCP y el TFTP auxiliar. No lo uses junto al TFTP de un FOG real.
+
+```toml
+interface = "eno1"
+fog_ip = "192.168.1.60"
+bootfile_bios = "undionly.kpxe"
+bootfile_uefi = "ipxe.efi"
+ipxe_bootfile = "fog-local.ipxe"
+listen_dhcp_port = 67
+listen_pxe_port = 4011
+enable_pxe_port = true
+allow_unmatched_clients = true
+enable_tftp = true
+tftp_root = "lab/tftproot"
+listen_tftp_port = 69
+```
+
+### Significado de los campos
+
+| Campo | Significado |
+|---|---|
+| `interface` | Interfaz del ordenador que ejecuta el proxy. Los ejemplos usan `eno1`. |
+| `fog_ip` | Servidor que ofrece TFTP/FOG. Puede estar en otro ordenador. |
+| `bootfile_bios` | Cargador BIOS general, normalmente `undionly.kpxe`. |
+| `bootfile_uefi` | Cargador UEFI general, normalmente `ipxe.efi`. |
+| `ipxe_bootfile` | Menú HTTP de FOG para la segunda fase iPXE. |
+| `listen_dhcp_port` | Puerto de anuncio ProxyDHCP inicial, normalmente UDP/67. |
+| `listen_pxe_port` | Puerto de selección PXE posterior, normalmente UDP/4011. |
+| `enable_pxe_port` | Debe permanecer en `true` para máxima compatibilidad. |
+| `allow_unmatched_clients` | `true` atiende a todos; `false` solo atiende coincidencias permitidas en `[[client_rule]]`. |
+| `[[client_rule]]` | Autoriza o deniega PXE por prefijo MAC. La primera coincidencia gana. |
+| `enable_tftp` | `false` con FOG real; `true` solo en laboratorio sin TFTP externo. |
+| `[[boot_rule]]` | Solo cambia el cargador para un prefijo MAC; no autoriza ni bloquea clientes. |
+
+### Controlar qué equipos reciben PXE
+
+Por defecto se atiende a todos:
+
+```toml
+allow_unmatched_clients = true
+```
+
+Para crear una lista blanca, cambia el valor a `false` y añade uno o varios `[[client_rule]]`:
+
+```toml
+allow_unmatched_clients = false
+
+# Permite todo un lote por prefijo MAC.
+[[client_rule]]
+name = "aula-1"
+mac_prefix = "00:11:22"
+allow = true
+
+# Permite un equipo exacto usando la MAC completa.
+[[client_rule]]
+name = "equipo-profesor"
+mac_prefix = "AA:BB:CC:DD:EE:FF"
+allow = true
+```
+
+Las reglas se evalúan de arriba abajo y gana la primera coincidencia. Esto permite excepciones:
+
+```toml
+allow_unmatched_clients = false
+
+# Esta regla más específica debe ir primero.
+[[client_rule]]
+name = "virtualbox-bloqueada"
+mac_prefix = "08:00:27:AA:BB:CC"
+allow = false
+
+[[client_rule]]
+name = "resto-virtualbox"
+mac_prefix = "08:00:27"
+allow = true
+```
+
+Un cliente no autorizado sigue obteniendo su dirección IP del DHCP principal, pero `fog-proxydhcp` no le responde ni en UDP/67 ni en UDP/4011. Por tanto, no recibe el arranque FOG desde este proxy.
+
+> El filtrado por MAC es control operativo, no seguridad fuerte: una dirección MAC puede falsificarse.
+
+`[[client_rule]]` controla **quién puede arrancar por este proxy**. `[[boot_rule]]` controla **qué cargador recibe un cliente ya autorizado**. Son funciones distintas.
+
+### Flujo probado con VirtualBox UEFI
+
+1. UDP/67 anuncia que existe ProxyDHCP, sin enviar todavía el cargador.
+2. El DHCP principal asigna la IP al cliente.
+3. VirtualBox consulta UDP/4011.
+4. El proxy responde con `snponly.efi` por la regla `08:00:27`.
+5. El cliente descarga `snponly.efi` por TFTP desde FOG.
+6. iPXE abre `boot.php` por HTTP.
 
 ## Ejecución de prueba
 
@@ -270,7 +339,7 @@ Después arranca un cliente con PXE activado. Deberías ver logs similares a:
 
 ```text
 sent OFFER: mac=xx:xx:xx:xx:xx:xx peer=0.0.0.0:68 port=67 bootfile=ipxe.efi arch=[9]
-sent ACK: mac=xx:xx:xx:xx:xx:xx peer=192.168.1.123:68 port=4011 bootfile=ipxe.efi arch=[9]
+sent ACK: mac=xx:xx:xx:xx:xx:xx peer=192.168.1.123:4011 port=4011 bootfile=ipxe.efi arch=[9]
 ```
 
 ## Instalación en el sistema
@@ -402,25 +471,12 @@ Si otro servicio DHCP ya ocupa UDP/67 en el mismo host/interfaz, este proxy no p
 
 ## Ejecutar el proxy en una máquina distinta a FOG
 
-Está soportado.
+Está soportado y no requiere instalar FOG en la máquina proxy. Usa el **escenario 2** de la sección [Configuración](#configuración). Recuerda:
 
-Ejemplo:
-
-```text
-Servidor FOG:          192.168.1.50
-Máquina ProxyDHCP:     192.168.1.60
-DHCP/router:           192.168.1.1
-```
-
-Usa esto en `config.toml` en la máquina proxy:
-
-```toml
-fog_ip = "192.168.1.50"
-ipxe_bootfile = "http://192.168.1.50/fog/service/ipxe/boot.php"
-enable_tftp = false
-```
-
-No pongas `fog_ip` con la IP de la máquina proxy salvo que el proxy sea también el servidor FOG/TFTP.
+- `interface = "eno1"` pertenece a la máquina proxy.
+- `fog_ip` e `ipxe_bootfile` apuntan al servidor FOG remoto.
+- Los clientes deben llegar al FOG remoto por UDP/69 y TCP/80.
+- Proxy, clientes y FOG deben compartir VLAN/dominio de broadcast o usar DHCP relay.
 
 ## Solución de problemas
 

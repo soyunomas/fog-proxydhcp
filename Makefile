@@ -9,8 +9,14 @@ PREFIX ?= /usr/local
 SYSCONFDIR ?= /etc/fog-proxydhcp
 SYSTEMD_DIR ?= /etc/systemd/system
 GO ?= go
+BIN_DIST_DIR := dist/bin
+BUILD_FLAGS := -trimpath -ldflags="-w -s"
 
-.PHONY: help deps tidy build deb clean run install uninstall install-service uninstall-service service-start service-stop service-restart service-status logs check ports fmt
+.PHONY: help deps tidy build \
+	openwrt openwrt-amd64 openwrt-armv7 openwrt-arm64 openwrt-mips openwrt-mipsel \
+	raspi raspi-armv6 raspi-armv7 raspi-arm64 \
+	deb clean run install uninstall install-service uninstall-service \
+	service-start service-stop service-restart service-status logs check ports fmt
 
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -27,8 +33,44 @@ fmt: ## Format Go code.
 check: fmt ## Run static compile check.
 	$(GO) test ./...
 
-build: deps ## Build static Linux amd64 binary.
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -ldflags="-w -s" -o $(APP) ./main.go
+build: ## Build a static binary for the current Linux architecture.
+	CGO_ENABLED=0 GOOS=linux $(GO) build $(BUILD_FLAGS) -o $(APP) .
+
+openwrt: openwrt-amd64 openwrt-armv7 openwrt-arm64 openwrt-mips openwrt-mipsel ## Build all common OpenWrt targets.
+
+openwrt-amd64: ## Build for OpenWrt x86-64.
+	@mkdir -p $(BIN_DIST_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build $(BUILD_FLAGS) -o $(BIN_DIST_DIR)/$(APP)-openwrt-amd64 .
+
+openwrt-armv7: ## Build for OpenWrt ARMv7.
+	@mkdir -p $(BIN_DIST_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 $(GO) build $(BUILD_FLAGS) -o $(BIN_DIST_DIR)/$(APP)-openwrt-armv7 .
+
+openwrt-arm64: ## Build for OpenWrt ARM64/aarch64.
+	@mkdir -p $(BIN_DIST_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build $(BUILD_FLAGS) -o $(BIN_DIST_DIR)/$(APP)-openwrt-arm64 .
+
+openwrt-mips: ## Build for OpenWrt MIPS big-endian with soft-float.
+	@mkdir -p $(BIN_DIST_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=mips GOMIPS=softfloat $(GO) build $(BUILD_FLAGS) -o $(BIN_DIST_DIR)/$(APP)-openwrt-mips .
+
+openwrt-mipsel: ## Build for OpenWrt MIPS little-endian with soft-float.
+	@mkdir -p $(BIN_DIST_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat $(GO) build $(BUILD_FLAGS) -o $(BIN_DIST_DIR)/$(APP)-openwrt-mipsel .
+
+raspi: raspi-armv6 raspi-armv7 raspi-arm64 ## Build binaries for all supported Raspberry Pi variants.
+
+raspi-armv6: ## Build for Raspberry Pi 1 and Zero (32-bit ARMv6).
+	@mkdir -p $(BIN_DIST_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=6 $(GO) build $(BUILD_FLAGS) -o $(BIN_DIST_DIR)/$(APP)-raspi-armv6 .
+
+raspi-armv7: ## Build for Raspberry Pi 2/3/4 using a 32-bit OS.
+	@mkdir -p $(BIN_DIST_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 $(GO) build $(BUILD_FLAGS) -o $(BIN_DIST_DIR)/$(APP)-raspi-armv7 .
+
+raspi-arm64: ## Build for Raspberry Pi 3/4/5 using a 64-bit OS.
+	@mkdir -p $(BIN_DIST_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build $(BUILD_FLAGS) -o $(BIN_DIST_DIR)/$(APP)-raspi-arm64 .
 
 deb: build ## Build a Debian package in ./dist.
 	rm -rf $(DEB_BUILD_DIR)
@@ -72,9 +114,9 @@ deb: build ## Build a Debian package in ./dist.
 	install -d $(DEB_DIST_DIR)
 	dpkg-deb --build --root-owner-group $(DEB_BUILD_DIR) $(DEB_DIST_DIR)/$(PACKAGE)_$(VERSION)_$(DEB_ARCH).deb
 
-clean: ## Remove generated binary.
+clean: ## Remove generated binaries.
 	rm -f $(APP)
-	rm -rf build dist
+	rm -rf $(BIN_DIST_DIR)
 
 run: build ## Run locally with sudo using ./config.toml.
 	sudo ./$(APP) -config $(CONFIG)

@@ -35,19 +35,28 @@ const (
 )
 
 type Config struct {
-	Interface      string     `toml:"interface"`
-	FogIP          string     `toml:"fog_ip"`
-	BootfileBIOS   string     `toml:"bootfile_bios"`
-	BootfileUEFI   string     `toml:"bootfile_uefi"`
-	ListenDHCPPort int        `toml:"listen_dhcp_port"`
-	ListenPXEPort  int        `toml:"listen_pxe_port"`
-	EnablePXEPort  bool       `toml:"enable_pxe_port"`
-	EnableTFTP     bool       `toml:"enable_tftp"`
-	ListenTFTPPort int        `toml:"listen_tftp_port"`
-	TFTPRoot       string     `toml:"tftp_root"`
-	IPXEBootfile   string     `toml:"ipxe_bootfile"`
-	BootRules      []BootRule `toml:"boot_rule"`
-	ProxyIP        net.IP     `toml:"-"`
+	Interface             string       `toml:"interface"`
+	FogIP                 string       `toml:"fog_ip"`
+	BootfileBIOS          string       `toml:"bootfile_bios"`
+	BootfileUEFI          string       `toml:"bootfile_uefi"`
+	ListenDHCPPort        int          `toml:"listen_dhcp_port"`
+	ListenPXEPort         int          `toml:"listen_pxe_port"`
+	EnablePXEPort         bool         `toml:"enable_pxe_port"`
+	EnableTFTP            bool         `toml:"enable_tftp"`
+	ListenTFTPPort        int          `toml:"listen_tftp_port"`
+	TFTPRoot              string       `toml:"tftp_root"`
+	IPXEBootfile          string       `toml:"ipxe_bootfile"`
+	AllowUnmatchedClients bool         `toml:"allow_unmatched_clients"`
+	ClientRules           []ClientRule `toml:"client_rule"`
+	BootRules             []BootRule   `toml:"boot_rule"`
+	ProxyIP               net.IP       `toml:"-"`
+}
+
+type ClientRule struct {
+	Name                string `toml:"name"`
+	MACPrefix           string `toml:"mac_prefix"`
+	Allow               bool   `toml:"allow"`
+	normalizedMACPrefix string
 }
 
 type BootRule struct {
@@ -70,10 +79,11 @@ func loadConfig(filename string) (*Config, error) {
 	}
 
 	cfg := Config{
-		ListenDHCPPort: portDHCP,
-		ListenPXEPort:  portPXE,
-		ListenTFTPPort: portTFTP,
-		EnablePXEPort:  true,
+		ListenDHCPPort:        portDHCP,
+		ListenPXEPort:         portPXE,
+		ListenTFTPPort:        portTFTP,
+		EnablePXEPort:         true,
+		AllowUnmatchedClients: true,
 	}
 
 	if err := toml.Unmarshal(data, &cfg); err != nil {
@@ -132,6 +142,22 @@ func validateConfig(cfg *Config) error {
 		if !info.IsDir() {
 			return fmt.Errorf("tftp_root must be a directory: %q", cfg.TFTPRoot)
 		}
+	}
+
+	for i := range cfg.ClientRules {
+		rule := &cfg.ClientRules[i]
+		rule.Name = strings.TrimSpace(rule.Name)
+		rule.MACPrefix = strings.TrimSpace(rule.MACPrefix)
+
+		if rule.MACPrefix == "" {
+			return fmt.Errorf("client_rule[%d] mac_prefix cannot be empty", i)
+		}
+
+		normalized, err := normalizeMACPrefix(rule.MACPrefix)
+		if err != nil {
+			return fmt.Errorf("client_rule[%d] invalid mac_prefix %q: %w", i, rule.MACPrefix, err)
+		}
+		rule.normalizedMACPrefix = normalized
 	}
 
 	for i := range cfg.BootRules {
@@ -221,7 +247,9 @@ func makeProxyHandler(cfg *Config, listenPort int) server4.Handler {
 
 		switch listenPort {
 		case cfg.ListenDHCPPort:
-			if msgType != dhcpv4.MessageTypeDiscover && msgType != dhcpv4.MessageTypeRequest {
+			// UDP/67 only advertises ProxyDHCP. A DHCPREQUEST selects the real
+			// DHCP server; a zero-address ACK here can race the real lease ACK.
+			if msgType != dhcpv4.MessageTypeDiscover {
 				if isPXEClient(req) {
 					log.Printf("ignored %s: mac=%s peer=%s port=%d", msgType, req.ClientHWAddr, peer, listenPort)
 				}
@@ -247,6 +275,12 @@ func makeProxyHandler(cfg *Config, listenPort int) server4.Handler {
 			return
 		}
 
+		allowed, source := clientAllowed(req.ClientHWAddr, cfg)
+		if !allowed {
+			log.Printf("ignored unauthorized PXE client: mac=%s peer=%s port=%d source=%s", req.ClientHWAddr, peer, listenPort, source)
+			return
+		}
+
 		replyType := dhcpv4.MessageTypeOffer
 		if msgType == dhcpv4.MessageTypeRequest {
 			replyType = dhcpv4.MessageTypeAck
@@ -265,22 +299,25 @@ func makeProxyHandler(cfg *Config, listenPort int) server4.Handler {
 		// ProxyDHCP must not allocate an address. The real DHCP server does that.
 		reply.YourIPAddr = net.IPv4zero
 
-		// BOOTP fields used by several PXE firmwares.
-		reply.ServerIPAddr = fogIP
-		reply.ServerHostName = cfg.FogIP
-		reply.BootFileName = bootFile
-
-		// DHCP options used by most PXE/iPXE clients.
 		reply.UpdateOption(dhcpv4.OptMessageType(replyType))
 		reply.UpdateOption(dhcpv4.OptServerIdentifier(cfg.ProxyIP))
 		reply.UpdateOption(dhcpv4.OptClassIdentifier("PXEClient"))
-		reply.UpdateOption(dhcpv4.OptTFTPServerName(cfg.FogIP))
-		reply.UpdateOption(dhcpv4.OptBootFileName(bootFile))
-		if !isIPXEClient(req) {
-			// The PXE boot server advertised in option 43 (sub-option 8) must be the
-			// host that actually answers PXE requests on UDP/4011, which is this proxy
-			// (cfg.ProxyIP), not necessarily the FOG/TFTP server (cfg.FogIP).
-			reply.UpdateOption(dhcpv4.OptGeneric(dhcpv4.OptionVendorSpecificInformation, pxeVendorOption43(cfg.ProxyIP)))
+
+		if listenPort == cfg.ListenDHCPPort && !isIPXEClient(req) {
+			// The initial proxy offer only announces the PXE service. Firmware gets
+			// its lease from the real DHCP server, then requests boot details on 4011.
+			reply.ServerIPAddr = cfg.ProxyIP
+			reply.ServerHostName = ""
+			reply.BootFileName = ""
+			copyPXEClientIdentifier(reply, req)
+		} else {
+			// UDP/4011 and already-running iPXE clients receive the actual target.
+			reply.ServerIPAddr = fogIP
+			reply.ServerHostName = cfg.FogIP
+			reply.BootFileName = bootFile
+			reply.UpdateOption(dhcpv4.OptTFTPServerName(cfg.FogIP))
+			reply.UpdateOption(dhcpv4.OptBootFileName(bootFile))
+			copyPXEClientOptions(reply, req)
 		}
 
 		if _, err := conn.WriteTo(reply.ToBytes(), peer); err != nil {
@@ -293,9 +330,46 @@ func makeProxyHandler(cfg *Config, listenPort int) server4.Handler {
 	}
 }
 
+func copyPXEClientIdentifier(reply, req *dhcpv4.DHCPv4) {
+	if value := req.Options.Get(dhcpv4.OptionClientMachineIdentifier); len(value) > 0 {
+		reply.UpdateOption(dhcpv4.OptGeneric(dhcpv4.OptionClientMachineIdentifier, append([]byte(nil), value...)))
+	}
+}
+
+func copyPXEClientOptions(reply, req *dhcpv4.DHCPv4) {
+	// RFC 4578 requires these options in PXE client and server packets.
+	for _, code := range []dhcpv4.OptionCode{
+		dhcpv4.OptionClientSystemArchitectureType,
+		dhcpv4.OptionClientNetworkInterfaceIdentifier,
+		dhcpv4.OptionClientMachineIdentifier,
+	} {
+		if value := req.Options.Get(code); len(value) > 0 {
+			reply.UpdateOption(dhcpv4.OptGeneric(code, append([]byte(nil), value...)))
+		}
+	}
+}
+
 func isPXEClient(req *dhcpv4.DHCPv4) bool {
 	classID := req.ClassIdentifier()
 	return strings.HasPrefix(classID, "PXEClient") || isIPXEClient(req)
+}
+
+func clientAllowed(mac net.HardwareAddr, cfg *Config) (bool, string) {
+	normalizedMAC, err := normalizeMACPrefix(mac.String())
+	if err == nil {
+		for i := range cfg.ClientRules {
+			rule := &cfg.ClientRules[i]
+			if strings.HasPrefix(normalizedMAC, rule.normalizedMACPrefix) {
+				name := rule.Name
+				if name == "" {
+					name = rule.MACPrefix
+				}
+				return rule.Allow, "client_rule:" + name
+			}
+		}
+	}
+
+	return cfg.AllowUnmatchedClients, "allow_unmatched_clients"
 }
 
 func selectBootFile(req *dhcpv4.DHCPv4, cfg *Config) bootSelection {
@@ -674,8 +748,8 @@ func main() {
 		log.Fatalf("configuration error: %v", err)
 	}
 
-	log.Printf("starting FOG ProxyDHCP: interface=%s proxy_ip=%s fog_ip=%s dhcp_port=%d pxe_port=%d tftp=%t",
-		cfg.Interface, cfg.ProxyIP, cfg.FogIP, cfg.ListenDHCPPort, cfg.ListenPXEPort, cfg.EnableTFTP)
+	log.Printf("starting FOG ProxyDHCP: interface=%s proxy_ip=%s fog_ip=%s dhcp_port=%d pxe_port=%d tftp=%t allow_unmatched=%t client_rules=%d",
+		cfg.Interface, cfg.ProxyIP, cfg.FogIP, cfg.ListenDHCPPort, cfg.ListenPXEPort, cfg.EnableTFTP, cfg.AllowUnmatchedClients, len(cfg.ClientRules))
 
 	dhcpServer, err := startServer(cfg, cfg.ListenDHCPPort)
 	if err != nil {

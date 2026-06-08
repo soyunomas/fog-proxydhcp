@@ -3,8 +3,8 @@
 # Usa el DHCP real del router de casa. Este proceso solo anuncia PXE y, si
 # enable_tftp=true, emula el TFTP de FOG en este mismo host.
 
-# Cambia esto por la interfaz de tu LAN real, por ejemplo eno1, enp3s0 o wlan0.
-interface = "CAMBIA_ESTO"
+# Interfaz de la LAN donde están los clientes PXE.
+interface = "eno1"
 
 # Cambia esto por la IP LAN del host que ejecuta fog-proxydhcp.
 # Debe estar en la misma red que la VM puente y debe ser alcanzable por TFTP.

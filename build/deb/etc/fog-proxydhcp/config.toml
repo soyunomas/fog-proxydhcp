@@ -1,54 +1,120 @@
-# FOG ProxyDHCP configuration
+# Configuración de FOG ProxyDHCP
+#
+# Elige UN SOLO escenario. El escenario probado/recomendado está activo.
+# Para usar otro: comenta por completo el escenario 1 y descomenta por
+# completo el escenario elegido. No dejes dos escenarios activos porque TOML
+# no permite repetir las mismas claves.
 
-# Network interface where PXE clients are visible.
-# Examples: eth0, ens18, enp3s0
+# ============================================================================
+# ESCENARIO 1 - PROBADO: proxy en el servidor FOG + VirtualBox BIOS/UEFI
+# ============================================================================
+# Cambia 192.168.1.50 por la IP real del servidor FOG.
+# eno1 es la interfaz conectada a la red de los clientes PXE.
+
 interface = "eno1"
-
-# Real FOG server IP address. This can be a different machine than this proxy.
-fog_ip = "192.168.24.2"
-
-# FOG default boot files.
-# Common FOG/iPXE alternatives. Uncomment the pair that fits your clients.
-#
-# Legacy BIOS:
-# - undionly.kpxe   default FOG BIOS chainloader, uses the NIC PXE/UNDI stack.
-# - undionly.kkpxe  BIOS fallback for systems that need more PXE stack kept loaded.
-# - ipxe.kpxe       BIOS chainloader with native iPXE drivers.
-# - ipxe.kkpxe      BIOS fallback variant with more PXE stack kept loaded.
-#
-# UEFI:
-# - snponly.efi     common FOG UEFI choice, uses the firmware SNP driver.
-# - ipxe.efi        UEFI iPXE with native drivers.
-# - snp.efi         UEFI SNP variant that can try more than the boot NIC.
-#
-# FOG may include additional NIC-specific files in /tftpboot, such as
-# intel.pxe, intel.efi, realtek.kpxe, realtek.kkpxe, and realtek.efi.
+fog_ip = "192.168.1.50"
 bootfile_bios = "undionly.kpxe"
 bootfile_uefi = "ipxe.efi"
+ipxe_bootfile = "http://192.168.1.50/fog/service/ipxe/boot.php"
+listen_dhcp_port = 67
+listen_pxe_port = 4011
+enable_pxe_port = true
+allow_unmatched_clients = true
+enable_tftp = false
+tftp_root = "lab/tftproot"
+listen_tftp_port = 69
 
-# Optional boot rules. Rules are checked from top to bottom. The first matching
-# mac_prefix wins. Prefixes can use ":" "-" "." separators or no separators.
+# Control de acceso PXE:
+# - true: atiende a todos los clientes PXE (valor predeterminado).
+# - false: solo atiende a las MAC permitidas por [[client_rule]].
+# Para crear una lista blanca, cambia allow_unmatched_clients a false y
+# descomenta una o varias reglas como estas:
 #
-# Example: VirtualBox NICs usually start with 08:00:27.
+# [[client_rule]]
+# name = "aula-1"
+# mac_prefix = "00:11:22"
+# allow = true
+#
+# [[client_rule]]
+# name = "equipo-concreto"
+# mac_prefix = "AA:BB:CC:DD:EE:FF"
+# allow = true
+#
+# Las client_rule se evalúan en orden y la primera coincidencia gana.
+# Una MAC no autorizada sigue recibiendo IP del DHCP real, pero este proxy no
+# le responde por UDP/67 ni UDP/4011. Esto no es seguridad criptográfica:
+# una dirección MAC puede falsificarse.
+
+# Probado con MAC de VirtualBox 08:00:27, tanto BIOS como UEFI.
+[[boot_rule]]
+name = "virtualbox-tested"
+mac_prefix = "08:00:27"
+bootfile_bios = "ipxe.kpxe"
+bootfile_uefi = "snponly.efi"
+
+# ============================================================================
+# ESCENARIO 2 - proxy en OTRO ordenador Linux distinto del servidor FOG
+# ============================================================================
+# Funciona si proxy, FOG y clientes PXE comparten VLAN/dominio de broadcast,
+# salvo que exista DHCP relay/IP helper.
+# eno1 pertenece al ordenador PROXY.
+# fog_ip e ipxe_bootfile apuntan al servidor FOG remoto.
+# El ordenador proxy no necesita tener FOG instalado.
+# Los clientes deben alcanzar el servidor FOG por UDP/69 y TCP/80.
+#
+# interface = "eno1"
+# fog_ip = "192.168.1.50"
+# bootfile_bios = "undionly.kpxe"
+# bootfile_uefi = "ipxe.efi"
+# ipxe_bootfile = "http://192.168.1.50/fog/service/ipxe/boot.php"
+# listen_dhcp_port = 67
+# listen_pxe_port = 4011
+# enable_pxe_port = true
+# allow_unmatched_clients = true
+# enable_tftp = false
+# tftp_root = "lab/tftproot"
+# listen_tftp_port = 69
 #
 # [[boot_rule]]
-# name = "virtualbox"
+# name = "virtualbox-tested"
 # mac_prefix = "08:00:27"
 # bootfile_bios = "ipxe.kpxe"
 # bootfile_uefi = "snponly.efi"
-#
-# Example: only override UEFI for one vendor; BIOS falls back to bootfile_bios.
-#
-# [[boot_rule]]
-# name = "uefi-snp-clients"
-# mac_prefix = "52:54:00"
-# bootfile_uefi = "snponly.efi"
 
-# Standard ProxyDHCP/PXE ports.
-# Port 67 receives DHCPDISCOVER broadcasts.
-# Port 4011 handles PXE DHCPREQUEST traffic used by many firmwares.
-listen_dhcp_port = 67
-listen_pxe_port = 4011
+# ============================================================================
+# ESCENARIO 3 - FOG real y equipos físicos, sin regla de VirtualBox
+# ============================================================================
+# Puede ejecutarse en FOG o en otro ordenador proxy.
+# Si están separados, fog_ip sigue siendo la IP de FOG, nunca la del proxy.
+#
+# interface = "eno1"
+# fog_ip = "192.168.1.50"
+# bootfile_bios = "undionly.kpxe"
+# bootfile_uefi = "ipxe.efi"
+# ipxe_bootfile = "http://192.168.1.50/fog/service/ipxe/boot.php"
+# listen_dhcp_port = 67
+# listen_pxe_port = 4011
+# enable_pxe_port = true
+# allow_unmatched_clients = true
+# enable_tftp = false
+# tftp_root = "lab/tftproot"
+# listen_tftp_port = 69
 
-# Keep true unless you know your clients do not require PXE port 4011.
-enable_pxe_port = true
+# ============================================================================
+# ESCENARIO 4 - laboratorio SIN FOG, usando el TFTP auxiliar incluido
+# ============================================================================
+# Aquí fog_ip es la IP del ordenador proxy/laboratorio porque también sirve
+# los archivos de prueba. No actives este TFTP si ya existe un FOG real.
+#
+# interface = "eno1"
+# fog_ip = "192.168.1.60"
+# bootfile_bios = "undionly.kpxe"
+# bootfile_uefi = "ipxe.efi"
+# ipxe_bootfile = "fog-local.ipxe"
+# listen_dhcp_port = 67
+# listen_pxe_port = 4011
+# enable_pxe_port = true
+# allow_unmatched_clients = true
+# enable_tftp = true
+# tftp_root = "lab/tftproot"
+# listen_tftp_port = 69

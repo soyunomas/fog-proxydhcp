@@ -12,6 +12,69 @@ import (
 	"github.com/insomniacslk/dhcp/iana"
 )
 
+func TestLoadConfigDefaultsToAllowUnmatchedClients(t *testing.T) {
+	configFile := t.TempDir() + "/config.toml"
+	config := `
+interface = "lo"
+fog_ip = "192.168.56.10"
+bootfile_bios = "undionly.kpxe"
+bootfile_uefi = "ipxe.efi"
+listen_dhcp_port = 1067
+listen_pxe_port = 14011
+enable_pxe_port = true
+enable_tftp = false
+listen_tftp_port = 1069
+tftp_root = "lab/tftproot"
+`
+	if err := os.WriteFile(configFile, []byte(config), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg, err := loadConfig(configFile)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if !cfg.AllowUnmatchedClients {
+		t.Fatal("configuration without allow_unmatched_clients must default to true")
+	}
+}
+
+func TestLoadConfigParsesClientRules(t *testing.T) {
+	configFile := t.TempDir() + "/config.toml"
+	config := `
+interface = "lo"
+fog_ip = "192.168.56.10"
+bootfile_bios = "undionly.kpxe"
+bootfile_uefi = "ipxe.efi"
+listen_dhcp_port = 1067
+listen_pxe_port = 14011
+enable_pxe_port = true
+enable_tftp = false
+listen_tftp_port = 1069
+tftp_root = "lab/tftproot"
+allow_unmatched_clients = false
+
+[[client_rule]]
+name = "aula"
+mac_prefix = "00:11:22"
+allow = true
+`
+	if err := os.WriteFile(configFile, []byte(config), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg, err := loadConfig(configFile)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.AllowUnmatchedClients || len(cfg.ClientRules) != 1 {
+		t.Fatalf("parsed access control = allow_unmatched %t, rules %d; want false, 1", cfg.AllowUnmatchedClients, len(cfg.ClientRules))
+	}
+	if cfg.ClientRules[0].normalizedMACPrefix != "001122" {
+		t.Fatalf("normalized client prefix = %q, want 001122", cfg.ClientRules[0].normalizedMACPrefix)
+	}
+}
+
 func TestNormalizeMACPrefix(t *testing.T) {
 	tests := map[string]string{
 		"08:00:27":          "080027",
@@ -38,6 +101,38 @@ func TestNormalizeMACPrefixRejectsInvalidInput(t *testing.T) {
 		if _, err := normalizeMACPrefix(input); err == nil {
 			t.Fatalf("normalizeMACPrefix(%q) returned nil error", input)
 		}
+	}
+}
+
+func TestClientAllowedDefaultsToAllow(t *testing.T) {
+	allowed, source := clientAllowed(net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}, &Config{AllowUnmatchedClients: true})
+	if !allowed || source != "allow_unmatched_clients" {
+		t.Fatalf("clientAllowed = %t, %q; want true, allow_unmatched_clients", allowed, source)
+	}
+}
+
+func TestClientAllowedUsesFirstMatchingRule(t *testing.T) {
+	cfg := &Config{
+		AllowUnmatchedClients: false,
+		ClientRules: []ClientRule{
+			{Name: "blocked-host", MACPrefix: "08:00:27:aa:bb:cc", Allow: false, normalizedMACPrefix: "080027aabbcc"},
+			{Name: "virtualbox", MACPrefix: "08:00:27", Allow: true, normalizedMACPrefix: "080027"},
+		},
+	}
+
+	allowed, source := clientAllowed(net.HardwareAddr{0x08, 0x00, 0x27, 0xaa, 0xbb, 0xcc}, cfg)
+	if allowed || source != "client_rule:blocked-host" {
+		t.Fatalf("clientAllowed = %t, %q; want false, client_rule:blocked-host", allowed, source)
+	}
+
+	allowed, source = clientAllowed(net.HardwareAddr{0x08, 0x00, 0x27, 0x11, 0x22, 0x33}, cfg)
+	if !allowed || source != "client_rule:virtualbox" {
+		t.Fatalf("clientAllowed = %t, %q; want true, client_rule:virtualbox", allowed, source)
+	}
+
+	allowed, source = clientAllowed(net.HardwareAddr{0x52, 0x54, 0x00, 0x11, 0x22, 0x33}, cfg)
+	if allowed || source != "allow_unmatched_clients" {
+		t.Fatalf("clientAllowed = %t, %q; want false, allow_unmatched_clients", allowed, source)
 	}
 }
 
@@ -231,13 +326,14 @@ func (c *capturingConn) SetWriteDeadline(time.Time) error         { return nil }
 // PXE boot-server (option 43) pointing at the proxy IP.
 func TestHandlerProducesValidProxyOffer(t *testing.T) {
 	cfg := &Config{
-		Interface:      "lo",
-		FogIP:          "192.168.56.10",
-		BootfileBIOS:   "undionly.kpxe",
-		BootfileUEFI:   "ipxe.efi",
-		ListenDHCPPort: portDHCP,
-		ListenPXEPort:  portPXE,
-		ProxyIP:        net.IPv4(192, 168, 56, 1).To4(),
+		Interface:             "lo",
+		FogIP:                 "192.168.56.10",
+		BootfileBIOS:          "undionly.kpxe",
+		BootfileUEFI:          "ipxe.efi",
+		ListenDHCPPort:        portDHCP,
+		ListenPXEPort:         portPXE,
+		ProxyIP:               net.IPv4(192, 168, 56, 1).To4(),
+		AllowUnmatchedClients: true,
 	}
 
 	discover, err := dhcpv4.New()
@@ -248,6 +344,9 @@ func TestHandlerProducesValidProxyOffer(t *testing.T) {
 	discover.ClientHWAddr = net.HardwareAddr{0x08, 0x00, 0x27, 0x11, 0x22, 0x33}
 	discover.UpdateOption(dhcpv4.OptMessageType(dhcpv4.MessageTypeDiscover))
 	discover.UpdateOption(dhcpv4.OptClassIdentifier("PXEClient:Arch:00000:UNDI:002001"))
+	discover.UpdateOption(dhcpv4.OptClientArch(iana.EFI_X86_64))
+	discover.UpdateOption(dhcpv4.OptGeneric(dhcpv4.OptionClientNetworkInterfaceIdentifier, []byte{1, 3, 0}))
+	discover.UpdateOption(dhcpv4.OptGeneric(dhcpv4.OptionClientMachineIdentifier, []byte{0, 1, 2, 3, 4}))
 
 	conn := &capturingConn{}
 	handler := makeProxyHandler(cfg, cfg.ListenDHCPPort)
@@ -269,43 +368,146 @@ func TestHandlerProducesValidProxyOffer(t *testing.T) {
 	if !reply.YourIPAddr.Equal(net.IPv4zero) {
 		t.Fatalf("ProxyDHCP must not allocate an address, got YourIPAddr=%v", reply.YourIPAddr)
 	}
-	if !reply.ServerIPAddr.Equal(net.IPv4(192, 168, 56, 10)) {
-		t.Fatalf("siaddr (ServerIPAddr) = %v, want FOG IP 192.168.56.10", reply.ServerIPAddr)
+	if !reply.ServerIPAddr.Equal(net.IPv4(192, 168, 56, 1)) {
+		t.Fatalf("siaddr (ServerIPAddr) = %v, want proxy IP 192.168.56.1", reply.ServerIPAddr)
 	}
-	if reply.BootFileName != "undionly.kpxe" {
-		t.Fatalf("BootFileName = %q, want undionly.kpxe", reply.BootFileName)
+	if reply.BootFileName != "" {
+		t.Fatalf("initial proxy offer BootFileName = %q, want empty", reply.BootFileName)
 	}
 	if got := reply.ClassIdentifier(); got != "PXEClient" {
 		t.Fatalf("option 60 = %q, want PXEClient", got)
 	}
-	if got := reply.TFTPServerName(); got != "192.168.56.10" {
-		t.Fatalf("option 66 (TFTP server name) = %q, want FOG IP", got)
+	if got := reply.TFTPServerName(); got != "" {
+		t.Fatalf("initial proxy offer option 66 = %q, want empty", got)
+	}
+	if got := reply.BootFileNameOption(); got != "" {
+		t.Fatalf("initial proxy offer option 67 = %q, want empty", got)
+	}
+	if got, want := reply.Options.Get(dhcpv4.OptionClientMachineIdentifier), discover.Options.Get(dhcpv4.OptionClientMachineIdentifier); !bytes.Equal(got, want) {
+		t.Fatalf("option 97 = %v, want copied value %v", got, want)
+	}
+}
+
+func TestHandlerReturnsBootTargetOnPXEPort(t *testing.T) {
+	cfg := &Config{
+		FogIP:                 "192.168.56.10",
+		BootfileBIOS:          "undionly.kpxe",
+		BootfileUEFI:          "ipxe.efi",
+		ListenDHCPPort:        portDHCP,
+		ListenPXEPort:         portPXE,
+		ProxyIP:               net.IPv4(192, 168, 56, 1).To4(),
+		AllowUnmatchedClients: true,
 	}
 
-	// Option 43 sub-option 8 must advertise the proxy IP (the host answering 4011).
-	vendor := reply.Options.Get(dhcpv4.OptionVendorSpecificInformation)
-	wantVendor := []byte{
-		6, 1, 7,
-		8, 7, 0, 0, 1, 192, 168, 56, 1,
-		9, 6, 0, 0, 3, 'F', 'O', 'G',
-		10, 4, 0, 'F', 'O', 'G',
-		255,
+	request, err := dhcpv4.New()
+	if err != nil {
+		t.Fatalf("dhcpv4.New: %v", err)
 	}
-	if !bytes.Equal(vendor, wantVendor) {
-		t.Fatalf("option 43 = %v, want %v", vendor, wantVendor)
+	request.ClientIPAddr = net.IPv4(192, 168, 56, 20)
+	request.ClientHWAddr = net.HardwareAddr{0x08, 0x00, 0x27, 0x11, 0x22, 0x33}
+	request.UpdateOption(dhcpv4.OptMessageType(dhcpv4.MessageTypeRequest))
+	request.UpdateOption(dhcpv4.OptClassIdentifier("PXEClient:Arch:00007:UNDI:003000"))
+	request.UpdateOption(dhcpv4.OptClientArch(iana.EFI_X86_64))
+
+	conn := &capturingConn{}
+	makeProxyHandler(cfg, cfg.ListenPXEPort)(conn, &net.UDPAddr{IP: request.ClientIPAddr, Port: portPXE}, request)
+	if conn.lastPayload == nil {
+		t.Fatal("handler did not reply on the PXE port")
+	}
+	reply, err := dhcpv4.FromBytes(conn.lastPayload)
+	if err != nil {
+		t.Fatalf("reply does not parse as DHCPv4: %v", err)
+	}
+	if reply.MessageType() != dhcpv4.MessageTypeAck {
+		t.Fatalf("reply message type = %v, want ACK", reply.MessageType())
+	}
+	if reply.BootFileName != "ipxe.efi" || reply.BootFileNameOption() != "ipxe.efi" {
+		t.Fatalf("PXE bootfile fields = %q and %q, want ipxe.efi", reply.BootFileName, reply.BootFileNameOption())
+	}
+	if got := reply.TFTPServerName(); got != "192.168.56.10" {
+		t.Fatalf("PXE option 66 = %q, want FOG IP", got)
+	}
+}
+
+func TestHandlerIgnoresUnauthorizedClientOnBothPorts(t *testing.T) {
+	cfg := &Config{
+		FogIP:                 "192.168.56.10",
+		BootfileBIOS:          "undionly.kpxe",
+		BootfileUEFI:          "ipxe.efi",
+		ListenDHCPPort:        portDHCP,
+		ListenPXEPort:         portPXE,
+		ProxyIP:               net.IPv4(192, 168, 56, 1).To4(),
+		AllowUnmatchedClients: false,
+		ClientRules: []ClientRule{
+			{Name: "allowed", MACPrefix: "00:11:22", Allow: true, normalizedMACPrefix: "001122"},
+		},
+	}
+
+	for _, tc := range []struct {
+		name     string
+		port     int
+		msgType  dhcpv4.MessageType
+		peerPort int
+	}{
+		{name: "dhcp", port: portDHCP, msgType: dhcpv4.MessageTypeDiscover, peerPort: 68},
+		{name: "pxe", port: portPXE, msgType: dhcpv4.MessageTypeRequest, peerPort: portPXE},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := dhcpv4.New()
+			if err != nil {
+				t.Fatalf("dhcpv4.New: %v", err)
+			}
+			req.ClientHWAddr = net.HardwareAddr{0x08, 0x00, 0x27, 0x11, 0x22, 0x33}
+			req.UpdateOption(dhcpv4.OptMessageType(tc.msgType))
+			req.UpdateOption(dhcpv4.OptClassIdentifier("PXEClient:Arch:00007:UNDI:003000"))
+
+			conn := &capturingConn{}
+			makeProxyHandler(cfg, tc.port)(conn, &net.UDPAddr{IP: net.IPv4bcast, Port: tc.peerPort}, req)
+			if conn.lastPayload != nil {
+				t.Fatal("handler replied to an unauthorized PXE client")
+			}
+		})
+	}
+}
+
+func TestHandlerIgnoresLeaseRequestOnDHCPPort(t *testing.T) {
+	cfg := &Config{
+		FogIP:                 "192.168.56.10",
+		BootfileBIOS:          "undionly.kpxe",
+		BootfileUEFI:          "ipxe.efi",
+		ListenDHCPPort:        portDHCP,
+		ListenPXEPort:         portPXE,
+		ProxyIP:               net.IPv4(192, 168, 56, 1).To4(),
+		AllowUnmatchedClients: true,
+	}
+
+	request, err := dhcpv4.New()
+	if err != nil {
+		t.Fatalf("dhcpv4.New: %v", err)
+	}
+	request.ClientHWAddr = net.HardwareAddr{0x08, 0x00, 0x27, 0x11, 0x22, 0x33}
+	request.UpdateOption(dhcpv4.OptMessageType(dhcpv4.MessageTypeRequest))
+	request.UpdateOption(dhcpv4.OptClassIdentifier("PXEClient:Arch:00007:UNDI:003000"))
+	request.UpdateOption(dhcpv4.OptServerIdentifier(net.IPv4(192, 168, 56, 254)))
+
+	conn := &capturingConn{}
+	makeProxyHandler(cfg, cfg.ListenDHCPPort)(conn, &net.UDPAddr{IP: net.IPv4bcast, Port: 68}, request)
+	if conn.lastPayload != nil {
+		t.Fatal("ProxyDHCP must not ACK a lease request addressed to the real DHCP server")
 	}
 }
 
 func TestHandlerRepliesToIPXEUserClassWithScript(t *testing.T) {
 	cfg := &Config{
-		Interface:      "lo",
-		FogIP:          "192.168.56.10",
-		BootfileBIOS:   "undionly.kpxe",
-		BootfileUEFI:   "ipxe.efi",
-		IPXEBootfile:   "fog-local.ipxe",
-		ListenDHCPPort: portDHCP,
-		ListenPXEPort:  portPXE,
-		ProxyIP:        net.IPv4(192, 168, 56, 1).To4(),
+		Interface:             "lo",
+		FogIP:                 "192.168.56.10",
+		BootfileBIOS:          "undionly.kpxe",
+		BootfileUEFI:          "ipxe.efi",
+		IPXEBootfile:          "fog-local.ipxe",
+		ListenDHCPPort:        portDHCP,
+		ListenPXEPort:         portPXE,
+		ProxyIP:               net.IPv4(192, 168, 56, 1).To4(),
+		AllowUnmatchedClients: true,
 	}
 
 	discover, err := dhcpv4.New()
