@@ -43,6 +43,10 @@ El flujo de paquetes es:
 8. iPXE abre boot.php por HTTP y muestra el menú FOG.
 ```
 
+El siguiente diagrama resume visualmente cada fase y separa las funciones del cliente PXE, el servidor DHCP real y `fog-proxydhcp`:
+
+![Flujo por fases entre el cliente PXE, el servidor DHCP real y fog-proxydhcp](images/funcionamiento1.png)
+
 En la oferta inicial de UDP/67 no se envía el bootfile. Los datos reales de arranque se entregan en UDP/4011 mediante option 66, option 67 y los campos BOOTP `siaddr`, `sname` y `file`. Los clientes que ya se identifican como iPXE pueden recibir directamente la URL HTTP configurada en `ipxe_bootfile`.
 
 La selección BIOS y UEFI es automática. El cliente envía la opción DHCP 93, también llamada Client System Architecture. Los clientes BIOS reciben `bootfile_bios`; los clientes UEFI reciben `bootfile_uefi`.
@@ -65,7 +69,7 @@ Conviene conocer una limitación: ProxyDHCP es un complemento, no una sobrescrit
   - `sname`.
   - `file`.
 - Flujo ProxyDHCP en dos fases compatible con firmware UEFI de VirtualBox.
-- Lista blanca/negra opcional por prefijo MAC mediante `[[client_rule]]`.
+- Lista blanca/negra opcional por prefijo MAC mediante `[[client_rule]]`, más listas blancas por MAC exacta con `allowed_macs` / `allowed_macs_file`.
 - Destino opcional de segunda fase iPXE mediante `ipxe_bootfile`.
 - Servidor TFTP opcional solo para laboratorio, útil para probar sin FOG real.
 - Compilación de binario Linux estático.
@@ -268,6 +272,8 @@ listen_tftp_port = 69
 | `enable_pxe_port` | Debe permanecer en `true` para máxima compatibilidad. |
 | `allow_unmatched_clients` | `true` atiende a todos; `false` solo atiende coincidencias permitidas en `[[client_rule]]`. |
 | `[[client_rule]]` | Autoriza o deniega PXE por prefijo MAC. La primera coincidencia gana. |
+| `allowed_macs` | Lista blanca inline de MAC exactas. Solo permite; se evalúa después de `[[client_rule]]`. |
+| `allowed_macs_file` | Fichero externo (una MAC por línea) con la misma semántica que `allowed_macs`. |
 | `enable_tftp` | `false` con FOG real; `true` solo en laboratorio sin TFTP externo. |
 | `[[boot_rule]]` | Solo cambia el cargador para un prefijo MAC; no autoriza ni bloquea clientes. |
 
@@ -314,6 +320,21 @@ mac_prefix = "08:00:27"
 allow = true
 ```
 
+Si tienes una lista larga de equipos concretos, usa una lista blanca por MAC exacta en lugar de un `[[client_rule]]` por máquina. Puedes indicar las MAC en línea, en un fichero externo, o ambas:
+
+```toml
+allow_unmatched_clients = false
+
+# Lista inline de MAC completas.
+allowed_macs = ["AA:BB:CC:DD:EE:FF", "00:11:22:33:44:55"]
+
+# O un fichero con una MAC por línea (admite líneas en blanco y comentarios
+# con "#"). La ruta relativa se resuelve respecto al directorio del config.
+allowed_macs_file = "allowed-macs.txt"
+```
+
+Consulta [`allowed-macs.txt.example`](allowed-macs.txt.example) para el formato del fichero. `allowed_macs` y `allowed_macs_file` se evalúan **después** de las `[[client_rule]]` y solo *permiten* la MAC, así que una `[[client_rule]]` que deniegue sigue teniendo prioridad.
+
 Un cliente no autorizado sigue obteniendo su dirección IP del DHCP principal, pero `fog-proxydhcp` no le responde ni en UDP/67 ni en UDP/4011. Por tanto, no recibe el arranque FOG desde este proxy.
 
 > El filtrado por MAC es control operativo, no seguridad fuerte: una dirección MAC puede falsificarse.
@@ -340,6 +361,58 @@ Después arranca un cliente con PXE activado. Deberías ver logs similares a:
 ```text
 sent OFFER: mac=xx:xx:xx:xx:xx:xx peer=0.0.0.0:68 port=67 bootfile=ipxe.efi arch=[9]
 sent ACK: mac=xx:xx:xx:xx:xx:xx peer=192.168.1.123:4011 port=4011 bootfile=ipxe.efi arch=[9]
+```
+
+### Modo de depuración
+
+Para diagnosticar un cliente PXE, añade `--debug`:
+
+```bash
+sudo ./fog-proxy -config ./config.toml --debug
+```
+
+También puedes compilarlo y ejecutarlo con:
+
+```bash
+make run-debug
+```
+
+El modo de depuración añade:
+
+- Resumen decodificado de cada paquete DHCP/PXE recibido y enviado.
+- Opciones clave: tipo de mensaje, MAC, vendor class, user class, arquitectura, Parameter Request List y UUID/Client Machine Identifier.
+- Decisión tomada: cliente PXE/iPXE, autorización, regla aplicada y bootfile seleccionado.
+- Solicitudes RRQ y opciones negociadas si el TFTP auxiliar está activo.
+
+Es un modo muy verboso pensado para diagnósticos puntuales. Sin `--debug`, el servicio mantiene los logs resumidos normales.
+
+Para activarlo temporalmente en la instalación systemd, crea un override:
+
+```bash
+sudo systemctl edit fog-proxy.service
+```
+
+Añade:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/fog-proxy -config /etc/fog-proxydhcp/config.toml --debug
+```
+
+Después reinicia y sigue el fichero de log:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart fog-proxy.service
+make logs
+```
+
+Para retirar el override y volver al modo normal:
+
+```bash
+sudo systemctl revert fog-proxy.service
+sudo systemctl restart fog-proxy.service
 ```
 
 ## Instalación en el sistema
@@ -555,6 +628,7 @@ Los objetivos actuales incluyen:
 | `deb` | Construye un paquete Debian bajo `dist/`. |
 | `clean` | Elimina el binario generado y los directorios de salida de empaquetado. |
 | `run` | Construye y ejecuta `fog-proxy` localmente con `sudo` y `config.toml`. |
+| `run-debug` | Construye y ejecuta el proxy con trazas DHCP/PXE detalladas. |
 | `install` | Instala el binario y la configuración bajo `/usr/local/bin` y `/etc/fog-proxydhcp`. |
 | `uninstall` | Elimina el binario instalado, el directorio de configuración y la unidad de servicio. |
 | `install-service` | Instala el binario/configuración y habilita el servicio systemd. |

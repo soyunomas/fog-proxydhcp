@@ -1,1 +1,2 @@
 /etc/fog-proxydhcp/config.toml
+/etc/logrotate.d/fog-proxydhcp

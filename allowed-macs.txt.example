@@ -1,0 +1,16 @@
+# Lista blanca de MACs para fog-proxydhcp (allowed_macs_file).
+#
+# - Una MAC completa por línea.
+# - Se admiten separadores ":", "-", "." o sin separador.
+# - Las líneas en blanco y los comentarios (# hasta fin de línea) se ignoran.
+#
+# Para usar este fichero, en config.toml:
+#   allow_unmatched_clients = false
+#   allowed_macs_file = "allowed-macs.txt"
+
+# Aula 1
+AA:BB:CC:DD:EE:01
+AA:BB:CC:DD:EE:02
+
+# Equipo concreto con comentario al final de línea
+52:54:00:AA:BB:CC   # servidor de pruebas

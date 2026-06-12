@@ -18,7 +18,7 @@ BUILD_FLAGS := -trimpath -ldflags="-w -s"
 .PHONY: help deps tidy build \
 	openwrt openwrt-amd64 openwrt-armv7 openwrt-arm64 openwrt-mips openwrt-mipsel \
 	raspi raspi-armv6 raspi-armv7 raspi-arm64 \
-	deb clean run install uninstall install-service uninstall-service \
+	deb clean run run-debug install uninstall install-service uninstall-service \
 	service-start service-stop service-restart service-status logs logs-journal check ports fmt
 
 help: ## Show this help.
@@ -127,6 +127,9 @@ clean: ## Remove generated binaries.
 
 run: build ## Run locally with sudo using ./config.toml.
 	sudo ./$(APP) -config $(CONFIG)
+
+run-debug: build ## Run locally with verbose DHCP/PXE diagnostics.
+	sudo ./$(APP) -config $(CONFIG) --debug
 
 install: build ## Install binary and example config.
 	install -d $(DESTDIR)$(PREFIX)/bin

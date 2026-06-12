@@ -3,6 +3,7 @@ Version: 0.1.0
 Section: net
 Priority: optional
 Architecture: amd64
+Depends: logrotate
 Maintainer: soyunomas
 Homepage: https://github.com/soyunomas/fog-proxydhcp
 Description: ProxyDHCP service for FOG Project PXE booting

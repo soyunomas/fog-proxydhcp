@@ -80,7 +80,7 @@ the main DHCP server or configure them there with the correct FOG server IP.
   - `sname`.
   - `file`.
 - Two-stage ProxyDHCP flow compatible with VirtualBox UEFI firmware.
-- Optional MAC-prefix allow/deny rules through `[[client_rule]]`.
+- Optional MAC-prefix allow/deny rules through `[[client_rule]]`, plus exact-MAC allowlists via `allowed_macs` / `allowed_macs_file`.
 - Optional iPXE second-stage boot target using `ipxe_bootfile`.
 - Optional lab-only TFTP server for testing without a real FOG server.
 - Static Linux binary build.
@@ -283,6 +283,8 @@ listen_tftp_port = 69
 | `enable_pxe_port` | Keep `true` for best firmware compatibility. |
 | `allow_unmatched_clients` | `true` serves everyone; `false` only serves allowed `[[client_rule]]` matches. |
 | `[[client_rule]]` | Allows or denies PXE by MAC prefix. First match wins. |
+| `allowed_macs` | Inline allowlist of exact MAC addresses. Only allows; evaluated after `[[client_rule]]`. |
+| `allowed_macs_file` | External file (one MAC per line) with the same allowlist semantics as `allowed_macs`. |
 | `enable_tftp` | `false` with real FOG; `true` only in a lab without external TFTP. |
 | `[[boot_rule]]` | Only changes the loader for a MAC prefix; it does not allow or block clients. |
 
@@ -329,6 +331,21 @@ mac_prefix = "08:00:27"
 allow = true
 ```
 
+For a long list of individual computers, use an exact-MAC allowlist instead of one `[[client_rule]]` per machine. You can list MACs inline, in an external file, or both:
+
+```toml
+allow_unmatched_clients = false
+
+# Inline list of complete MAC addresses.
+allowed_macs = ["AA:BB:CC:DD:EE:FF", "00:11:22:33:44:55"]
+
+# Or point to a file with one MAC per line (blank lines and "#" comments
+# allowed). A relative path is resolved against this config file's directory.
+allowed_macs_file = "allowed-macs.txt"
+```
+
+See [`allowed-macs.txt.example`](allowed-macs.txt.example) for the file format. `allowed_macs` and `allowed_macs_file` are evaluated **after** `[[client_rule]]` and only ever *allow* a MAC, so a deny `[[client_rule]]` still takes precedence.
+
 An unauthorized client still receives an address from the main DHCP server, but `fog-proxydhcp` does not answer it on UDP/67 or UDP/4011. It therefore receives no FOG boot from this proxy.
 
 > MAC filtering is operational control, not strong security: MAC addresses can be spoofed.
@@ -355,6 +372,58 @@ Then boot a client with PXE enabled. You should see logs similar to:
 ```text
 sent OFFER: mac=xx:xx:xx:xx:xx:xx peer=0.0.0.0:68 port=67 bootfile=ipxe.efi arch=[9]
 sent ACK: mac=xx:xx:xx:xx:xx:xx peer=192.168.1.123:4011 port=4011 bootfile=ipxe.efi arch=[9]
+```
+
+### Debug mode
+
+Add `--debug` when diagnosing a PXE client:
+
+```bash
+sudo ./fog-proxy -config ./config.toml --debug
+```
+
+You can also build and run it with:
+
+```bash
+make run-debug
+```
+
+Debug mode adds:
+
+- Decoded summaries of every received and transmitted DHCP/PXE packet.
+- Key options: message type, MAC, vendor class, user class, architecture, Parameter Request List, and UUID/Client Machine Identifier.
+- The decision taken: PXE/iPXE detection, authorization, matched rule, and selected bootfile.
+- RRQ requests and negotiated options when the auxiliary TFTP server is enabled.
+
+This is intentionally verbose and intended for short diagnostic sessions. Without `--debug`, the service keeps its normal concise logs.
+
+To enable it temporarily for the systemd installation, create an override:
+
+```bash
+sudo systemctl edit fog-proxy.service
+```
+
+Add:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/fog-proxy -config /etc/fog-proxydhcp/config.toml --debug
+```
+
+Then restart the service and follow its log file:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart fog-proxy.service
+make logs
+```
+
+To remove the override and return to normal logging:
+
+```bash
+sudo systemctl revert fog-proxy.service
+sudo systemctl restart fog-proxy.service
 ```
 
 ## Install system-wide
@@ -573,6 +642,7 @@ Current targets include:
 | `deb` | Build a Debian package under `dist/`. |
 | `clean` | Remove the generated binary and packaging output directories. |
 | `run` | Build and run `fog-proxy` locally with `sudo` and `config.toml`. |
+| `run-debug` | Build and run the proxy with detailed DHCP/PXE traces. |
 | `install` | Install the binary and config under `/usr/local/bin` and `/etc/fog-proxydhcp`. |
 | `uninstall` | Remove the installed binary, config directory, and service unit. |
 | `install-service` | Install the binary/config and enable the systemd service. |

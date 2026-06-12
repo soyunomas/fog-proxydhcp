@@ -12,6 +12,13 @@ ExecStart=/usr/local/bin/fog-proxy -config /etc/fog-proxydhcp/config.toml
 Restart=always
 RestartSec=5
 
+# Application logs are written to /var/log/fog-proxydhcp/fog-proxy.log.
+# packaging/logrotate/fog-proxy rotates this file without restarting the service.
+LogsDirectory=fog-proxydhcp
+LogsDirectoryMode=0750
+StandardOutput=append:/var/log/fog-proxydhcp/fog-proxy.log
+StandardError=append:/var/log/fog-proxydhcp/fog-proxy.log
+
 # Root is used because UDP/67 is privileged. If you prefer capabilities,
 # install the binary accordingly and adjust User/CapabilityBoundingSet.
 AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW

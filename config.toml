@@ -44,6 +44,17 @@ listen_tftp_port = 69
 # Una MAC no autorizada sigue recibiendo IP del DHCP real, pero este proxy no
 # le responde por UDP/67 ni UDP/4011. Esto no es seguridad criptográfica:
 # una dirección MAC puede falsificarse.
+#
+# Lista blanca por MAC exacta (cómodo para muchos equipos):
+# - allowed_macs: lista inline de MACs completas.
+# - allowed_macs_file: fichero externo con una MAC por línea (admite líneas en
+#   blanco y comentarios con #). La ruta relativa se resuelve respecto al
+#   directorio de este config.toml. Ver allowed-macs.txt.example.
+# Ambas se evalúan DESPUÉS de las [[client_rule]] y permiten (allow) la MAC.
+# Para una lista blanca pura: allow_unmatched_clients = false + estas claves.
+#
+# allowed_macs = ["AA:BB:CC:DD:EE:FF", "00:11:22:33:44:55"]
+# allowed_macs_file = "allowed-macs.txt"
 
 # Probado con MAC de VirtualBox 08:00:27, tanto BIOS como UEFI.
 [[boot_rule]]

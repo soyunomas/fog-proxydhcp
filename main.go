@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -47,9 +48,15 @@ type Config struct {
 	TFTPRoot              string       `toml:"tftp_root"`
 	IPXEBootfile          string       `toml:"ipxe_bootfile"`
 	AllowUnmatchedClients bool         `toml:"allow_unmatched_clients"`
+	AllowedMACs           []string     `toml:"allowed_macs"`
+	AllowedMACsFile       string       `toml:"allowed_macs_file"`
 	ClientRules           []ClientRule `toml:"client_rule"`
 	BootRules             []BootRule   `toml:"boot_rule"`
 	ProxyIP               net.IP       `toml:"-"`
+
+	// allowedMACs maps a normalized 12-hex MAC to the source that whitelisted
+	// it ("allowed_macs" or "allowed_macs_file"). Built at load time.
+	allowedMACs map[string]string
 }
 
 type ClientRule struct {
@@ -91,6 +98,10 @@ func loadConfig(filename string) (*Config, error) {
 	}
 
 	if err := validateConfig(&cfg); err != nil {
+		return nil, err
+	}
+
+	if err := buildAllowedMACs(&cfg, filepath.Dir(filename)); err != nil {
 		return nil, err
 	}
 
@@ -213,6 +224,77 @@ func normalizeMACPrefix(value string) (string, error) {
 	return normalized, nil
 }
 
+func normalizeExactMAC(value string) (string, error) {
+	normalized, err := normalizeMACPrefix(value)
+	if err != nil {
+		return "", err
+	}
+	if len(normalized) != 12 {
+		return "", errors.New("must be a full MAC address")
+	}
+	return normalized, nil
+}
+
+// buildAllowedMACs collects the exact-MAC whitelist from the inline
+// allowed_macs list and the allowed_macs_file. A relative file path is
+// resolved against the directory of the config file.
+func buildAllowedMACs(cfg *Config, configDir string) error {
+	allowed := map[string]string{}
+
+	for i, raw := range cfg.AllowedMACs {
+		mac, err := normalizeExactMAC(raw)
+		if err != nil {
+			return fmt.Errorf("allowed_macs[%d] invalid mac %q: %w", i, raw, err)
+		}
+		allowed[mac] = "allowed_macs"
+	}
+
+	cfg.AllowedMACsFile = strings.TrimSpace(cfg.AllowedMACsFile)
+	if cfg.AllowedMACsFile != "" {
+		path := cfg.AllowedMACsFile
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(configDir, path)
+		}
+		if err := readAllowedMACsFile(path, allowed); err != nil {
+			return err
+		}
+	}
+
+	cfg.allowedMACs = allowed
+	return nil
+}
+
+// readAllowedMACsFile adds every MAC in the file to allowed. The file holds
+// one MAC per line; blank lines and "#" comments (whole-line or trailing) are
+// ignored. Inline allowed_macs entries take precedence as the source label.
+func readAllowedMACsFile(path string, allowed map[string]string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("cannot read allowed_macs_file %q: %w", path, err)
+	}
+
+	for i, line := range strings.Split(string(data), "\n") {
+		text := line
+		if idx := strings.IndexByte(text, '#'); idx >= 0 {
+			text = text[:idx]
+		}
+		text = strings.TrimSpace(text)
+		if text == "" {
+			continue
+		}
+
+		mac, err := normalizeExactMAC(text)
+		if err != nil {
+			return fmt.Errorf("allowed_macs_file %q line %d: invalid mac %q: %w", path, i+1, text, err)
+		}
+		if _, ok := allowed[mac]; !ok {
+			allowed[mac] = "allowed_macs_file"
+		}
+	}
+
+	return nil
+}
+
 func interfaceIPv4(name string) (net.IP, error) {
 	iface, err := net.InterfaceByName(name)
 	if err != nil {
@@ -241,42 +323,67 @@ func interfaceIPv4(name string) (net.IP, error) {
 	return nil, fmt.Errorf("interface %s has no IPv4 address", name)
 }
 
-func makeProxyHandler(cfg *Config, listenPort int) server4.Handler {
+func makeProxyHandler(cfg *Config, listenPort int, debug bool) server4.Handler {
 	return func(conn net.PacketConn, peer net.Addr, req *dhcpv4.DHCPv4) {
 		msgType := req.MessageType()
+		pxeClient := isPXEClient(req)
+		ipxeClient := isIPXEClient(req)
+
+		if debug {
+			log.Printf("debug rx: port=%d peer=%s\n%s", listenPort, peer, req.Summary())
+			log.Printf("debug options: msgtype=%s mac=%s class_id=%q user_class=%q arch=%v parameter_request_list=%v machine_id=%x",
+				msgType,
+				req.ClientHWAddr,
+				req.ClassIdentifier(),
+				req.UserClass(),
+				req.ClientArch(),
+				req.Options.Get(dhcpv4.OptionParameterRequestList),
+				req.Options.Get(dhcpv4.OptionClientMachineIdentifier),
+			)
+		}
 
 		switch listenPort {
 		case cfg.ListenDHCPPort:
 			// UDP/67 only advertises ProxyDHCP. A DHCPREQUEST selects the real
 			// DHCP server; a zero-address ACK here can race the real lease ACK.
 			if msgType != dhcpv4.MessageTypeDiscover {
-				if isPXEClient(req) {
-					log.Printf("ignored %s: mac=%s peer=%s port=%d", msgType, req.ClientHWAddr, peer, listenPort)
+				if pxeClient {
+					log.Printf("ignored %s on UDP/%d: only DISCOVER is answered here, the real DHCP server handles REQUEST (PXE REQUEST is answered on UDP/%d): mac=%s peer=%s",
+						msgType, listenPort, cfg.ListenPXEPort, req.ClientHWAddr, peer)
 				}
 				return
 			}
 		case cfg.ListenPXEPort:
 			if msgType != dhcpv4.MessageTypeRequest {
-				if isPXEClient(req) {
-					log.Printf("ignored %s: mac=%s peer=%s port=%d", msgType, req.ClientHWAddr, peer, listenPort)
+				if pxeClient {
+					log.Printf("ignored %s on UDP/%d: this port only answers the PXE REQUEST that asks for the boot file: mac=%s peer=%s",
+						msgType, listenPort, req.ClientHWAddr, peer)
 				}
 				return
 			}
 		default:
 			if msgType != dhcpv4.MessageTypeDiscover && msgType != dhcpv4.MessageTypeRequest {
-				if isPXEClient(req) {
-					log.Printf("ignored %s: mac=%s peer=%s port=%d", msgType, req.ClientHWAddr, peer, listenPort)
+				if pxeClient {
+					log.Printf("ignored %s on UDP/%d: only DISCOVER and REQUEST are handled: mac=%s peer=%s",
+						msgType, listenPort, req.ClientHWAddr, peer)
 				}
 				return
 			}
 		}
 
-		if !isPXEClient(req) {
+		if !pxeClient {
+			if debug {
+				log.Printf("debug decision: port=%d msgtype=%s pxe=false ipxe=%t action=ignore reason=not_pxe", listenPort, msgType, ipxeClient)
+			}
 			return
 		}
 
 		allowed, source := clientAllowed(req.ClientHWAddr, cfg)
 		if !allowed {
+			if debug {
+				log.Printf("debug decision: port=%d msgtype=%s pxe=true ipxe=%t allowed=false allowed_source=%s action=ignore reason=unauthorized",
+					listenPort, msgType, ipxeClient, source)
+			}
 			log.Printf("ignored unauthorized PXE client: mac=%s peer=%s port=%d source=%s", req.ClientHWAddr, peer, listenPort, source)
 			return
 		}
@@ -295,6 +402,10 @@ func makeProxyHandler(cfg *Config, listenPort int) server4.Handler {
 		fogIP := net.ParseIP(cfg.FogIP).To4()
 		selection := selectBootFile(req, cfg)
 		bootFile := selection.File
+		if debug {
+			log.Printf("debug decision: port=%d msgtype=%s pxe=true ipxe=%t allowed=true allowed_source=%s replytype=%s bootfile=%q boot_source=%s",
+				listenPort, msgType, ipxeClient, source, replyType, bootFile, selection.Source)
+		}
 
 		// ProxyDHCP must not allocate an address. The real DHCP server does that.
 		reply.YourIPAddr = net.IPv4zero
@@ -303,7 +414,7 @@ func makeProxyHandler(cfg *Config, listenPort int) server4.Handler {
 		reply.UpdateOption(dhcpv4.OptServerIdentifier(cfg.ProxyIP))
 		reply.UpdateOption(dhcpv4.OptClassIdentifier("PXEClient"))
 
-		if listenPort == cfg.ListenDHCPPort && !isIPXEClient(req) {
+		if listenPort == cfg.ListenDHCPPort && !ipxeClient {
 			// The initial proxy offer only announces the PXE service. Firmware gets
 			// its lease from the real DHCP server, then requests boot details on 4011.
 			reply.ServerIPAddr = cfg.ProxyIP
@@ -323,6 +434,9 @@ func makeProxyHandler(cfg *Config, listenPort int) server4.Handler {
 		if _, err := conn.WriteTo(reply.ToBytes(), peer); err != nil {
 			log.Printf("send failed: mac=%s peer=%s port=%d err=%v", req.ClientHWAddr, peer, listenPort, err)
 			return
+		}
+		if debug {
+			log.Printf("debug tx: replytype=%s port=%d peer=%s\n%s", replyType, listenPort, peer, reply.Summary())
 		}
 
 		log.Printf("sent %s: mac=%s peer=%s port=%d bootfile=%s source=%s arch=%v",
@@ -366,6 +480,10 @@ func clientAllowed(mac net.HardwareAddr, cfg *Config) (bool, string) {
 				}
 				return rule.Allow, "client_rule:" + name
 			}
+		}
+
+		if source, ok := cfg.allowedMACs[normalizedMAC]; ok {
+			return true, source
 		}
 	}
 
@@ -469,18 +587,19 @@ func pxeVendorOption43(serverIP net.IP) []byte {
 	}
 }
 
-func startServer(cfg *Config, port int) (*server4.Server, error) {
+func startServer(cfg *Config, port int, debug bool) (*server4.Server, error) {
 	addr := &net.UDPAddr{
 		IP:   net.IPv4zero,
 		Port: port,
 	}
 
-	return server4.NewServer(cfg.Interface, addr, makeProxyHandler(cfg, port))
+	return server4.NewServer(cfg.Interface, addr, makeProxyHandler(cfg, port, debug))
 }
 
 type tftpServer struct {
-	conn *net.UDPConn
-	root string
+	conn  *net.UDPConn
+	root  string
+	debug bool
 }
 
 type tftpRequest struct {
@@ -489,12 +608,12 @@ type tftpRequest struct {
 	options  map[string]string
 }
 
-func startTFTPServer(root string, port int) (*tftpServer, error) {
+func startTFTPServer(root string, port int, debug bool) (*tftpServer, error) {
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: port})
 	if err != nil {
 		return nil, err
 	}
-	return &tftpServer{conn: conn, root: root}, nil
+	return &tftpServer{conn: conn, root: root, debug: debug}, nil
 }
 
 func (s *tftpServer) Serve() error {
@@ -518,6 +637,10 @@ func (s *tftpServer) handleRequest(peer *net.UDPAddr, packet []byte) {
 	if req.mode != "octet" && req.mode != "netascii" {
 		sendTFTPError(s.conn, peer, 4, "unsupported transfer mode")
 		return
+	}
+	if s.debug {
+		log.Printf("debug tftp rrq: peer=%s file=%q mode=%s options=%s",
+			peer, req.filename, req.mode, formatTFTPOptions(req.options))
 	}
 
 	fullPath, err := safeTFTPPath(s.root, req.filename)
@@ -546,6 +669,29 @@ func (s *tftpServer) handleRequest(peer *net.UDPAddr, packet []byte) {
 		return
 	}
 	log.Printf("tftp sent: peer=%s file=%q size=%d blksize=%d", peer, req.filename, stat.Size(), blockSize)
+}
+
+func formatTFTPOptions(options map[string]string) string {
+	if len(options) == 0 {
+		return "{}"
+	}
+
+	keys := make([]string, 0, len(options))
+	for key := range options {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, key := range keys {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%s=%s", key, options[key])
+	}
+	b.WriteByte('}')
+	return b.String()
 }
 
 func parseTFTPRequest(packet []byte) (*tftpRequest, error) {
@@ -741,6 +887,7 @@ func sendTFTPError(conn *net.UDPConn, peer *net.UDPAddr, code uint16, message st
 
 func main() {
 	configFile := flag.String("config", defaultConfigFile, "Path to TOML configuration file")
+	debug := flag.Bool("debug", false, "Log decoded DHCP/PXE packets and decision details")
 	flag.Parse()
 
 	cfg, err := loadConfig(*configFile)
@@ -748,10 +895,10 @@ func main() {
 		log.Fatalf("configuration error: %v", err)
 	}
 
-	log.Printf("starting FOG ProxyDHCP: interface=%s proxy_ip=%s fog_ip=%s dhcp_port=%d pxe_port=%d tftp=%t allow_unmatched=%t client_rules=%d",
-		cfg.Interface, cfg.ProxyIP, cfg.FogIP, cfg.ListenDHCPPort, cfg.ListenPXEPort, cfg.EnableTFTP, cfg.AllowUnmatchedClients, len(cfg.ClientRules))
+	log.Printf("starting FOG ProxyDHCP: interface=%s proxy_ip=%s fog_ip=%s dhcp_port=%d pxe_port=%d tftp=%t debug=%t allow_unmatched=%t client_rules=%d allowed_macs=%d",
+		cfg.Interface, cfg.ProxyIP, cfg.FogIP, cfg.ListenDHCPPort, cfg.ListenPXEPort, cfg.EnableTFTP, *debug, cfg.AllowUnmatchedClients, len(cfg.ClientRules), len(cfg.allowedMACs))
 
-	dhcpServer, err := startServer(cfg, cfg.ListenDHCPPort)
+	dhcpServer, err := startServer(cfg, cfg.ListenDHCPPort, *debug)
 	if err != nil {
 		log.Fatalf("cannot listen on UDP/%d interface=%s: %v", cfg.ListenDHCPPort, cfg.Interface, err)
 	}
@@ -764,7 +911,7 @@ func main() {
 	}()
 
 	if cfg.EnablePXEPort {
-		pxeServer, err := startServer(cfg, cfg.ListenPXEPort)
+		pxeServer, err := startServer(cfg, cfg.ListenPXEPort, *debug)
 		if err != nil {
 			log.Fatalf("cannot listen on UDP/%d interface=%s: %v", cfg.ListenPXEPort, cfg.Interface, err)
 		}
@@ -776,7 +923,7 @@ func main() {
 	}
 
 	if cfg.EnableTFTP {
-		tftpServer, err := startTFTPServer(cfg.TFTPRoot, cfg.ListenTFTPPort)
+		tftpServer, err := startTFTPServer(cfg.TFTPRoot, cfg.ListenTFTPPort, *debug)
 		if err != nil {
 			log.Fatalf("cannot listen on UDP/%d for TFTP: %v", cfg.ListenTFTPPort, err)
 		}

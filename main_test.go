@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"log"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -320,6 +322,105 @@ func (c *capturingConn) SetDeadline(time.Time) error              { return nil }
 func (c *capturingConn) SetReadDeadline(time.Time) error          { return nil }
 func (c *capturingConn) SetWriteDeadline(time.Time) error         { return nil }
 
+func TestDebugLogsDecodedDHCPPacketAndDecision(t *testing.T) {
+	cfg := &Config{
+		FogIP:                 "192.168.56.10",
+		BootfileBIOS:          "undionly.kpxe",
+		BootfileUEFI:          "ipxe.efi",
+		ListenDHCPPort:        portDHCP,
+		ListenPXEPort:         portPXE,
+		ProxyIP:               net.IPv4(192, 168, 56, 1).To4(),
+		AllowUnmatchedClients: true,
+	}
+	discover, err := dhcpv4.New()
+	if err != nil {
+		t.Fatalf("dhcpv4.New: %v", err)
+	}
+	discover.ClientHWAddr = net.HardwareAddr{0x08, 0x00, 0x27, 0x11, 0x22, 0x33}
+	discover.UpdateOption(dhcpv4.OptMessageType(dhcpv4.MessageTypeDiscover))
+	discover.UpdateOption(dhcpv4.OptClassIdentifier("PXEClient:Arch:00009:UNDI:003000"))
+	discover.UpdateOption(dhcpv4.OptUserClass("iPXE"))
+	discover.UpdateOption(dhcpv4.OptClientArch(iana.EFI_X86_64))
+	discover.UpdateOption(dhcpv4.OptGeneric(dhcpv4.OptionParameterRequestList, []byte{1, 3, 6, 66, 67}))
+	discover.UpdateOption(dhcpv4.OptGeneric(dhcpv4.OptionClientMachineIdentifier, []byte{0, 1, 2, 3, 4}))
+
+	var logs bytes.Buffer
+	previousWriter := log.Writer()
+	previousFlags := log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(previousWriter)
+		log.SetFlags(previousFlags)
+	})
+
+	conn := &capturingConn{}
+	makeProxyHandler(cfg, cfg.ListenDHCPPort, true)(
+		conn,
+		&net.UDPAddr{IP: net.IPv4bcast, Port: 68},
+		discover,
+	)
+
+	for _, want := range []string{
+		"debug rx:",
+		"debug options:",
+		`class_id="PXEClient:Arch:00009:UNDI:003000"`,
+		"user_class=[\"iPXE\"]",
+		"parameter_request_list=[1 3 6 66 67]",
+		"machine_id=0001020304",
+		"debug decision:",
+		"allowed=true",
+		"debug tx:",
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("debug logs do not contain %q:\n%s", want, logs.String())
+		}
+	}
+}
+
+func TestDebugDisabledDoesNotLogDebugTraces(t *testing.T) {
+	cfg := &Config{
+		FogIP:                 "192.168.56.10",
+		BootfileBIOS:          "undionly.kpxe",
+		BootfileUEFI:          "ipxe.efi",
+		ListenDHCPPort:        portDHCP,
+		ListenPXEPort:         portPXE,
+		ProxyIP:               net.IPv4(192, 168, 56, 1).To4(),
+		AllowUnmatchedClients: true,
+	}
+	discover, err := dhcpv4.New()
+	if err != nil {
+		t.Fatalf("dhcpv4.New: %v", err)
+	}
+	discover.ClientHWAddr = net.HardwareAddr{0x08, 0x00, 0x27, 0x11, 0x22, 0x33}
+	discover.UpdateOption(dhcpv4.OptMessageType(dhcpv4.MessageTypeDiscover))
+	discover.UpdateOption(dhcpv4.OptClassIdentifier("PXEClient:Arch:00000:UNDI:002001"))
+
+	var logs bytes.Buffer
+	previousWriter := log.Writer()
+	previousFlags := log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(previousWriter)
+		log.SetFlags(previousFlags)
+	})
+
+	conn := &capturingConn{}
+	makeProxyHandler(cfg, cfg.ListenDHCPPort, false)(
+		conn,
+		&net.UDPAddr{IP: net.IPv4bcast, Port: 68},
+		discover,
+	)
+
+	if strings.Contains(logs.String(), "debug ") {
+		t.Fatalf("debug-disabled handler emitted debug logs:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "sent OFFER") {
+		t.Fatalf("normal send log missing:\n%s", logs.String())
+	}
+}
+
 // TestHandlerProducesValidProxyOffer drives makeProxyHandler with a synthetic
 // PXE DHCPDISCOVER and asserts the OFFER is a well-formed ProxyDHCP reply:
 // no IP allocation, FOG IP in BOOTP/option 66, the selected bootfile, and the
@@ -349,7 +450,7 @@ func TestHandlerProducesValidProxyOffer(t *testing.T) {
 	discover.UpdateOption(dhcpv4.OptGeneric(dhcpv4.OptionClientMachineIdentifier, []byte{0, 1, 2, 3, 4}))
 
 	conn := &capturingConn{}
-	handler := makeProxyHandler(cfg, cfg.ListenDHCPPort)
+	handler := makeProxyHandler(cfg, cfg.ListenDHCPPort, false)
 	peer := &net.UDPAddr{IP: net.IPv4bcast, Port: 68}
 	handler(conn, peer, discover)
 
@@ -410,7 +511,7 @@ func TestHandlerReturnsBootTargetOnPXEPort(t *testing.T) {
 	request.UpdateOption(dhcpv4.OptClientArch(iana.EFI_X86_64))
 
 	conn := &capturingConn{}
-	makeProxyHandler(cfg, cfg.ListenPXEPort)(conn, &net.UDPAddr{IP: request.ClientIPAddr, Port: portPXE}, request)
+	makeProxyHandler(cfg, cfg.ListenPXEPort, false)(conn, &net.UDPAddr{IP: request.ClientIPAddr, Port: portPXE}, request)
 	if conn.lastPayload == nil {
 		t.Fatal("handler did not reply on the PXE port")
 	}
@@ -462,7 +563,7 @@ func TestHandlerIgnoresUnauthorizedClientOnBothPorts(t *testing.T) {
 			req.UpdateOption(dhcpv4.OptClassIdentifier("PXEClient:Arch:00007:UNDI:003000"))
 
 			conn := &capturingConn{}
-			makeProxyHandler(cfg, tc.port)(conn, &net.UDPAddr{IP: net.IPv4bcast, Port: tc.peerPort}, req)
+			makeProxyHandler(cfg, tc.port, false)(conn, &net.UDPAddr{IP: net.IPv4bcast, Port: tc.peerPort}, req)
 			if conn.lastPayload != nil {
 				t.Fatal("handler replied to an unauthorized PXE client")
 			}
@@ -491,7 +592,7 @@ func TestHandlerIgnoresLeaseRequestOnDHCPPort(t *testing.T) {
 	request.UpdateOption(dhcpv4.OptServerIdentifier(net.IPv4(192, 168, 56, 254)))
 
 	conn := &capturingConn{}
-	makeProxyHandler(cfg, cfg.ListenDHCPPort)(conn, &net.UDPAddr{IP: net.IPv4bcast, Port: 68}, request)
+	makeProxyHandler(cfg, cfg.ListenDHCPPort, false)(conn, &net.UDPAddr{IP: net.IPv4bcast, Port: 68}, request)
 	if conn.lastPayload != nil {
 		t.Fatal("ProxyDHCP must not ACK a lease request addressed to the real DHCP server")
 	}
@@ -520,7 +621,7 @@ func TestHandlerRepliesToIPXEUserClassWithScript(t *testing.T) {
 	discover.UpdateOption(dhcpv4.OptUserClass("iPXE"))
 
 	conn := &capturingConn{}
-	handler := makeProxyHandler(cfg, cfg.ListenDHCPPort)
+	handler := makeProxyHandler(cfg, cfg.ListenDHCPPort, false)
 	handler(conn, &net.UDPAddr{IP: net.IPv4bcast, Port: 68}, discover)
 
 	if conn.lastPayload == nil {
@@ -548,7 +649,7 @@ func TestTFTPServerServesFileWithOptions(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	server, err := startTFTPServer(root, 0)
+	server, err := startTFTPServer(root, 0, false)
 	if err != nil {
 		t.Fatalf("startTFTPServer: %v", err)
 	}
@@ -635,4 +736,135 @@ func makeTFTPACK(block uint16) []byte {
 	binary.BigEndian.PutUint16(packet[0:2], 4)
 	binary.BigEndian.PutUint16(packet[2:4], block)
 	return packet
+}
+
+func TestBuildAllowedMACsInlineAndFile(t *testing.T) {
+	dir := t.TempDir()
+	macFile := dir + "/allowed-macs.txt"
+	content := `
+# Aula 1
+AA:BB:CC:DD:EE:01
+aa-bb-cc-dd-ee-02   # con comentario en línea
+
+525400AABBCC
+`
+	if err := os.WriteFile(macFile, []byte(content), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg := &Config{
+		AllowedMACs:     []string{"11:22:33:44:55:66"},
+		AllowedMACsFile: "allowed-macs.txt",
+	}
+	if err := buildAllowedMACs(cfg, dir); err != nil {
+		t.Fatalf("buildAllowedMACs: %v", err)
+	}
+
+	want := map[string]string{
+		"112233445566": "allowed_macs",
+		"aabbccddee01": "allowed_macs_file",
+		"aabbccddee02": "allowed_macs_file",
+		"525400aabbcc": "allowed_macs_file",
+	}
+	if len(cfg.allowedMACs) != len(want) {
+		t.Fatalf("allowedMACs size = %d, want %d (%v)", len(cfg.allowedMACs), len(want), cfg.allowedMACs)
+	}
+	for mac, source := range want {
+		if cfg.allowedMACs[mac] != source {
+			t.Fatalf("allowedMACs[%q] = %q, want %q", mac, cfg.allowedMACs[mac], source)
+		}
+	}
+}
+
+func TestBuildAllowedMACsInlineTakesPrecedenceOverFile(t *testing.T) {
+	dir := t.TempDir()
+	macFile := dir + "/macs.txt"
+	if err := os.WriteFile(macFile, []byte("AA:BB:CC:DD:EE:FF\n"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg := &Config{
+		AllowedMACs:     []string{"aa:bb:cc:dd:ee:ff"},
+		AllowedMACsFile: macFile,
+	}
+	if err := buildAllowedMACs(cfg, dir); err != nil {
+		t.Fatalf("buildAllowedMACs: %v", err)
+	}
+	if cfg.allowedMACs["aabbccddeeff"] != "allowed_macs" {
+		t.Fatalf("source = %q, want allowed_macs", cfg.allowedMACs["aabbccddeeff"])
+	}
+}
+
+func TestBuildAllowedMACsRejectsInvalidEntries(t *testing.T) {
+	t.Run("inline prefix not a full mac", func(t *testing.T) {
+		cfg := &Config{AllowedMACs: []string{"08:00:27"}}
+		if err := buildAllowedMACs(cfg, t.TempDir()); err == nil {
+			t.Fatal("expected error for partial inline mac")
+		}
+	})
+
+	t.Run("file with invalid mac reports line", func(t *testing.T) {
+		dir := t.TempDir()
+		macFile := dir + "/macs.txt"
+		if err := os.WriteFile(macFile, []byte("AA:BB:CC:DD:EE:FF\nnot-a-mac\n"), 0644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		cfg := &Config{AllowedMACsFile: macFile}
+		err := buildAllowedMACs(cfg, dir)
+		if err == nil {
+			t.Fatal("expected error for invalid mac in file")
+		}
+		if !strings.Contains(err.Error(), "line 2") {
+			t.Fatalf("error = %v, want it to mention line 2", err)
+		}
+	})
+
+	t.Run("missing file", func(t *testing.T) {
+		cfg := &Config{AllowedMACsFile: "does-not-exist.txt"}
+		if err := buildAllowedMACs(cfg, t.TempDir()); err == nil {
+			t.Fatal("expected error for missing file")
+		}
+	})
+}
+
+func TestClientAllowedUsesAllowedMACsWhitelist(t *testing.T) {
+	cfg := &Config{
+		AllowUnmatchedClients: false,
+		allowedMACs: map[string]string{
+			"aabbccddee01": "allowed_macs_file",
+			"112233445566": "allowed_macs",
+		},
+	}
+
+	allowed, source := clientAllowed(net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01}, cfg)
+	if !allowed || source != "allowed_macs_file" {
+		t.Fatalf("clientAllowed(file mac) = %t, %q; want true, allowed_macs_file", allowed, source)
+	}
+
+	allowed, source = clientAllowed(net.HardwareAddr{0x11, 0x22, 0x33, 0x44, 0x55, 0x66}, cfg)
+	if !allowed || source != "allowed_macs" {
+		t.Fatalf("clientAllowed(inline mac) = %t, %q; want true, allowed_macs", allowed, source)
+	}
+
+	allowed, source = clientAllowed(net.HardwareAddr{0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, cfg)
+	if allowed || source != "allow_unmatched_clients" {
+		t.Fatalf("clientAllowed(unknown mac) = %t, %q; want false, allow_unmatched_clients", allowed, source)
+	}
+}
+
+func TestClientRuleTakesPrecedenceOverAllowedMACs(t *testing.T) {
+	cfg := &Config{
+		AllowUnmatchedClients: false,
+		ClientRules: []ClientRule{
+			{Name: "blocked", MACPrefix: "aa:bb:cc", Allow: false, normalizedMACPrefix: "aabbcc"},
+		},
+		allowedMACs: map[string]string{
+			"aabbccddee01": "allowed_macs",
+		},
+	}
+
+	allowed, source := clientAllowed(net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01}, cfg)
+	if allowed || source != "client_rule:blocked" {
+		t.Fatalf("clientAllowed = %t, %q; want false, client_rule:blocked", allowed, source)
+	}
 }
